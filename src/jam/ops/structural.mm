@@ -33,6 +33,13 @@ uint16_t FloatToHalf(float f) {
   return static_cast<uint16_t>(sign | (exp << 10) | (mant >> 13));
 }
 
+uint16_t FloatToBF16(float f) {
+  uint32_t x;
+  std::memcpy(&x, &f, 4);
+  x += 0x7FFFu + ((x >> 16) & 1u);
+  return static_cast<uint16_t>(x >> 16);
+}
+
 void Constant(Lowering& L, mlir::Operation* op) {
   auto cst = mlir::cast<mlir::stablehlo::ConstantOp>(op);
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -55,7 +62,7 @@ void Constant(Lowering& L, mlir::Operation* op) {
   // Dense: pack raw little-endian bytes in the device dtype, then constantWithData.
   int64_t n = rt.getNumElements();
   size_t bytes = (mps == MPSDataTypeFloat32 || mps == MPSDataTypeInt32) ? 4
-               : (mps == MPSDataTypeFloat16) ? 2
+               : (mps == MPSDataTypeFloat16 || mps == MPSDataTypeBFloat16) ? 2
                : 1;
   NSMutableData* nd = [NSMutableData dataWithLength:(NSUInteger)(n * bytes)];
   void* p = [nd mutableBytes];
@@ -65,6 +72,7 @@ void Constant(Lowering& L, mlir::Operation* op) {
     for (const llvm::APFloat& fv : attr.getValues<llvm::APFloat>()) {
       double dv = fv.convertToDouble();
       if (mps == MPSDataTypeFloat16) reinterpret_cast<uint16_t*>(p)[i] = FloatToHalf((float)dv);
+      else if (mps == MPSDataTypeBFloat16) reinterpret_cast<uint16_t*>(p)[i] = FloatToBF16((float)dv);
       else reinterpret_cast<float*>(p)[i] = static_cast<float>(dv);
       ++i;
     }

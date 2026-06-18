@@ -181,7 +181,11 @@ PJRT_Client* CreateClient(int num_nodes, int node_id) {
 
 void ReleaseStorage(PJRT_Buffer* b) {
   if (b->handle) {
+#ifdef MCCL_JAX_WITH_JAM
+    mccl_jax::jam::RecycleDeviceBuffer(b->handle, b->data, b->nbytes);
+#else
     mccl_jax::metal::Release(b->handle);
+#endif
     b->handle = nullptr;
     b->data = nullptr;
   }

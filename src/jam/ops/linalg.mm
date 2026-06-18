@@ -191,7 +191,7 @@ void Convolution(Lowering& L, mlir::Operation* op) {
   }
   std::vector<int64_t> wPerm = {kSpatial[0], kSpatial[1], dn.getKernelInputFeatureDimension(),
                                 dn.getKernelOutputFeatureDimension()};  // → HWIO
-  MPSGraphTensor* w = [L.graph() transposeTensor:L.value(op->getOperand(1)) permutation:PermFrom(wPerm) name:nil];
+  MPSGraphTensor* w = Transposed(L, L.value(op->getOperand(1)), wPerm);
 
   int64_t strideY = 1, strideX = 1, dilY = 1, dilX = 1;
   if (auto s = conv.getWindowStrides()) { auto sr = *s; if (sr.size() == 2) { strideY = sr[0]; strideX = sr[1]; } }

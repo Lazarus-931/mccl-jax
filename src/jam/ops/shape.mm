@@ -218,27 +218,43 @@ void Pad(Lowering& L, mlir::Operation* op) {
   llvm::ArrayRef<int64_t> high = p.getEdgePaddingHigh();
   llvm::ArrayRef<int64_t> interior = p.getInteriorPadding();
   for (int64_t v : interior) if (v < 0) { L.fail("jam: pad with negative interior padding unsupported"); return; }
-  for (int64_t v : low) if (v < 0) { L.fail("jam: pad with negative (crop) padding unsupported"); return; }
-  for (int64_t v : high) if (v < 0) { L.fail("jam: pad with negative (crop) padding unsupported"); return; }
   double fill = 0.0;
   if (!TraceScalarConstant(L, op->getOperand(1), &fill)) {
     L.fail("jam: pad with non-constant fill value");
     return;
   }
+  llvm::ArrayRef<int64_t> inShape = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType()).getShape();
+  int64_t rank = static_cast<int64_t>(inShape.size());
+  bool hasInterior = false; for (int64_t v : interior) if (v != 0) hasInterior = true;
+  bool hasNeg = false;
+  for (int64_t v : low) if (v < 0) hasNeg = true;
+  for (int64_t v : high) if (v < 0) hasNeg = true;
+
   MPSGraphTensor* t = A(L, op);
-  bool hasInterior = false;
-  for (int64_t v : interior) if (v != 0) hasInterior = true;
+  if (hasNeg) {
+    if (hasInterior) { L.fail("jam: pad with mixed negative-edge + interior padding unsupported"); return; }
+    std::vector<int64_t> starts(rank), ends(rank), strides(rank, 1);
+    for (int64_t d = 0; d < rank; ++d) {
+      starts[d] = low[d] < 0 ? -low[d] : 0;
+      ends[d] = inShape[d] - (high[d] < 0 ? -high[d] : 0);
+    }
+    t = [L.graph() sliceTensor:t starts:IntArray(starts) ends:IntArray(ends) strides:IntArray(strides) name:nil];
+  }
   if (hasInterior) {
-    std::vector<int64_t> shape(
-        mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType()).getShape());
+    std::vector<int64_t> shape(inShape.begin(), inShape.end());
     t = InteriorDilate(L, t, shape, interior, fill);
   }
-  Set(L, op, [L.graph() padTensor:t
-                 withPaddingMode:MPSGraphPaddingModeConstant
-                     leftPadding:IntArray(low)
-                    rightPadding:IntArray(high)
-                   constantValue:fill
-                            name:nil]);
+  std::vector<int64_t> lowPad(rank), highPad(rank);
+  bool anyPad = false;
+  for (int64_t d = 0; d < rank; ++d) {
+    lowPad[d] = low[d] > 0 ? low[d] : 0;
+    highPad[d] = high[d] > 0 ? high[d] : 0;
+    if (lowPad[d] || highPad[d]) anyPad = true;
+  }
+  if (anyPad)
+    t = [L.graph() padTensor:t withPaddingMode:MPSGraphPaddingModeConstant
+                     leftPadding:IntArray(lowPad) rightPadding:IntArray(highPad) constantValue:fill name:nil];
+  Set(L, op, t);
 }
 
 // iota: coordinate ramp along one axis, cast to the result dtype.

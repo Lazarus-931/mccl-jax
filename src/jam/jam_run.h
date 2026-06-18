@@ -48,6 +48,8 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
 std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs,
                 std::vector<RunOutput>& outputs, const CollectiveFn& collective);
 
+void RecycleDeviceBuffer(void* handle, void* data, std::size_t nbytes);
+
 }  // namespace mccl_jax::jam
 
 #endif  // MCCL_JAX_SRC_JAM_JAM_RUN_H_

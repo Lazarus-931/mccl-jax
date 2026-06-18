@@ -105,7 +105,8 @@ class BufferPool {
     if (enabled_ && nbytes != 0) {
       std::lock_guard<std::mutex> lk(mu_);
       auto& v = free_[nbytes];
-      if (v.size() < kCapPerSize) { v.push_back({data, handle}); return; }
+      std::size_t cap = std::max<std::size_t>(2, std::min<std::size_t>(kCapPerSize, (std::size_t(32) << 20) / nbytes));
+      if (v.size() < cap) { v.push_back({data, handle}); return; }
     }
     mccl_jax::metal::Release(handle);  // disabled, size 0, or this size's free-list is full → free to OS
   }
@@ -269,7 +270,8 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
       // Size-aware: defer only SMALL in-place collectives (biases, scalars). Their per-call mccl
       // overhead dominates, and the gather/scatter memcpy to fuse them is cheap. Big buffers (weights)
       // run separately — fusing them was measured slower (their memcpy outweighs the saved call).
-      constexpr std::size_t kFuseMaxBytes = 256 * 1024;
+      static const std::size_t kFuseMaxBytes = getenv("MCCL_JAX_FUSE_MAX_BYTES")
+          ? (std::size_t)std::atoll(getenv("MCCL_JAX_FUSE_MAX_BYTES")) : (std::size_t)(256 * 1024);
       bool small = (std::size_t)c.send_count * Width(c.dtype) <= kFuseMaxBytes;
       if (fuse_enabled && inplace && small && !pendingHas(c.send_slot) &&
           (pending.empty() || sameCfg(c, *pending[0]))) {
@@ -388,6 +390,10 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
   return Run(prog, inputs, outputs);
 }
 
+void RecycleDeviceBuffer(void* handle, void* data, std::size_t nbytes) {
+  Pool().Recycle(handle, data, nbytes);
+}
+
 std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs,
                 std::vector<RunOutput>& outputs) {
   @autoreleasepool {
@@ -418,9 +424,9 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
         [NSMutableDictionary dictionary];
     for (std::size_t i = 0; i < out_specs.size(); ++i) {
       std::size_t nbytes = NumElems(out_specs[i].dims) * Width(out_specs[i].dtype);
-      mccl_jax::metal::Allocation alloc = mccl_jax::metal::Allocate(nbytes);
+      mccl_jax::metal::Allocation alloc = Pool().Acquire(nbytes);
       if (nbytes != 0 && alloc.data == nullptr) {
-        for (auto& o : out) if (o.handle) mccl_jax::metal::Release(o.handle);
+        for (auto& o : out) if (o.handle) Pool().Recycle(o.handle, o.data, o.nbytes);
         return "jam run: output allocation failed";
       }
       out[i] = {alloc.data, alloc.handle, nbytes, out_specs[i].dims, out_specs[i].dtype};
