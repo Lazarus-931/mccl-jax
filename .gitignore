@@ -1,0 +1,9 @@
+# reverse-engineering working artifacts (unpacked jax-metal wheel + binary, ~190MB)
+re/
+
+# python
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+.venv/
