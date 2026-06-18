@@ -7,7 +7,6 @@ namespace mccl_collective {
 
 namespace {
 
-// Parse an integer env var. On absence -> default. On malformed value -> error.
 Status ParseIntEnv(const char* key, int default_value, int* out) {
   const char* v = std::getenv(key);
   if (v == nullptr || v[0] == '\0') {
@@ -24,7 +23,7 @@ Status ParseIntEnv(const char* key, int default_value, int* out) {
   return Status::Ok();
 }
 
-}  // namespace
+}
 
 Status BootstrapFromEnv(BootstrapInfo* out) {
   if (out == nullptr) return Status::Error("bootstrap: out is null");
@@ -57,4 +56,4 @@ Status BootstrapFromEnv(BootstrapInfo* out) {
   return Status::Ok();
 }
 
-}  // namespace mccl_collective
+}

@@ -1,14 +1,10 @@
-// Multi-rank AllReduce smoke — one process per Mac. Each rank contributes (rank+1); the
-// sum-AllReduce result must be N(N+1)/2 on every rank.
-// Launch with MCCL_RANK / MCCL_WORLD_SIZE / MCCL_BOOTSTRAP_IP / MCCL_BOOTSTRAP_PORT / MCCL_METAL_DIR.
-
 #include <cstdio>
 #include <memory>
 #include <string>
 
 #include "collectives.h"
 #include "comm.h"
-#include "mccl.h"  // libmccl: page-aligned UMA buffers (mcclPageAlloc/mcclPageFree)
+#include "mccl.h"
 
 using mccl_collective::AllReduce;
 using mccl_collective::Comm;

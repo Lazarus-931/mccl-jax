@@ -7,8 +7,6 @@
 #include <string>
 #include <vector>
 
-
-
 namespace mccl_jax::jam {
 
 enum class DType {
@@ -23,14 +21,11 @@ struct IoSpec {
   DType dtype = DType::kInvalid;
 };
 
-// Cross-host collectives. jam splits the program at these and routes them (via a callback) to
-// the collective layer (mccl); the plugin maps these to mcclAllReduce/etc.
 enum class CollectiveOp {
   kAllReduce, kAllGather, kReduceScatter, kBroadcast, kAllToAll, kCollectivePermute
 };
 enum class ReduceKind { kSum, kProd, kMax, kMin, kAvg };
 
-// Compiled artifact (pimpl): owns the MPSGraph + ordered I/O tensors. Internals in program_impl.h.
 class CompiledProgram {
  public:
   struct Impl;
@@ -48,13 +43,12 @@ class CompiledProgram {
 };
 
 struct CompileResult {
-  std::unique_ptr<CompiledProgram> program;  // null on failure
-  std::string error;                          // empty on success
+  std::unique_ptr<CompiledProgram> program;
+  std::string error;
 };
 
-// num_processes = cluster size (1 ⇒ single device: collectives lower as identity, no extra segments).
 CompileResult Compile(const char* stablehlo_bytecode, std::size_t size, int num_processes = 1);
 
-}  // namespace mccl_jax::jam
+}
 
-#endif  // MCCL_JAX_SRC_JAM_JAM_H_
+#endif

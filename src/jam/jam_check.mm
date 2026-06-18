@@ -1,7 +1,3 @@
-// jam_check — standalone end-to-end harness for the real compiled jam.
-//   jam_check <artifact.mlirbc> <out_dir> [in0.bin in1.bin ...]
-// Inputs in @main order; outputs written as <out_dir>/out{i}.bin in return order.
-
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
@@ -27,7 +23,6 @@ std::string ReadFile(const std::string& path) {
   return ss.str();
 }
 
-// Bytes-per-element and MPSDataType for a jam IoSpec dtype (mirrors Lowering::MpsDType).
 struct DTInfo { size_t bytes; MPSDataType mps; };
 DTInfo Info(mccl_jax::jam::DType d) {
   using DT = mccl_jax::jam::DType;
@@ -36,9 +31,9 @@ DTInfo Info(mccl_jax::jam::DType d) {
     case DT::kBF16: return {2, MPSDataTypeBFloat16};
     case DT::kI8:   return {1, MPSDataTypeInt8};
     case DT::kPred: return {1, MPSDataTypeBool};
-    case DT::kI64:  return {4, MPSDataTypeInt32};   // narrowed on device
+    case DT::kI64:  return {4, MPSDataTypeInt32};
     case DT::kI32:  return {4, MPSDataTypeInt32};
-    default:        return {4, MPSDataTypeFloat32};  // f32 / f64 / etc.
+    default:        return {4, MPSDataTypeFloat32};
   }
 }
 
@@ -51,25 +46,25 @@ size_t NumElems(const std::vector<int64_t>& dims) {
 NSArray<NSNumber*>* MpsShape(const std::vector<int64_t>& dims) {
   NSMutableArray<NSNumber*>* a = [NSMutableArray array];
   for (int64_t d : dims) [a addObject:@(d)];
-  if (a.count == 0) [a addObject:@1];  // rank-0 modeled as [1] (matches the lowering)
+  if (a.count == 0) [a addObject:@1];
   return a;
 }
 
-}  // namespace
+}
 
 int main(int argc, const char** argv) {
   @autoreleasepool {
-    // --list-ops: enumerate the op registry and exit.
+
     if (argc >= 2 && std::string(argv[1]) == "--list-ops") {
       auto names = mccl_jax::jam::RegisteredOpNames();
       printf("jam registered op handlers: %zu\n", names.size());
       for (const auto& n : names) printf("  %s\n", n.c_str());
       return 0;
     }
-    // --bench <N> <artifact> [in0.bin ...]: time Compile() + N warm GPU runs. No output files.
+
     bool bench = (argc >= 2 && std::string(argv[1]) == "--bench");
     int bench_n = 50;
-    int argbase = 1;  // index of <artifact>
+    int argbase = 1;
     if (bench) {
       if (argc < 4) { fprintf(stderr, "usage: %s --bench <N> <artifact> [inputs...]\n", argv[0]); return 2; }
       bench_n = atoi(argv[2]);
@@ -131,9 +126,8 @@ int main(int argc, const char** argv) {
     NSMutableArray<MPSGraphTensor*>* targets = [NSMutableArray array];
     for (MPSGraphTensor* t : impl->outputs) [targets addObject:t];
 
-    // ---- benchmark mode: time compile + N warm GPU runs, dictionary path vs precompiled executable ----
     if (bench) {
-      // warmup (also triggers MPSGraph's own JIT/compile of the graph).
+
       for (int w = 0; w < 3; ++w) {
         @autoreleasepool {
           (void)[impl->graph runWithMTLCommandQueue:queue feeds:feeds targetTensors:targets targetOperations:nil];
@@ -145,7 +139,7 @@ int main(int argc, const char** argv) {
           auto s = Clock::now();
           MPSGraphTensorDataDictionary* r = [impl->graph runWithMTLCommandQueue:queue feeds:feeds
                                                                   targetTensors:targets targetOperations:nil];
-          // Force completion by reading the first output.
+
           MPSGraphTensorData* td = r[(MPSGraphTensor*)targets[0]];
           (void)[td mpsndarray];
           double ms = std::chrono::duration<double, std::milli>(Clock::now() - s).count();
@@ -155,7 +149,6 @@ int main(int argc, const char** argv) {
       printf("BENCH compile_ms=%.3f gpu_mean_ms=%.4f gpu_min_ms=%.4f runs=%d\n",
              compile_ms, total / bench_n, best, bench_n);
 
-      // ---- precompiled MPSGraphExecutable path: compile once, run with ordered arrays ----
       auto te0 = Clock::now();
       NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feedShapes =
           [NSMutableDictionary dictionary];
@@ -171,7 +164,7 @@ int main(int argc, const char** argv) {
                                          compilationDescriptor:cd];
       double exe_compile_ms = std::chrono::duration<double, std::milli>(Clock::now() - te0).count();
       if (exe != nil) {
-        // Order the input MPSGraphTensorData to match the executable's feedTensors order.
+
         NSArray<MPSGraphTensor*>* feedOrder = exe.feedTensors;
         NSMutableArray<MPSGraphTensorData*>* inputsArray = [NSMutableArray array];
         for (MPSGraphTensor* t : feedOrder) [inputsArray addObject:feeds[t]];
@@ -189,7 +182,7 @@ int main(int argc, const char** argv) {
             auto s = Clock::now();
             NSArray<MPSGraphTensorData*>* res = [exe runWithMTLCommandQueue:queue inputsArray:inputsArray
                                                               resultsArray:nil executionDescriptor:ed];
-            (void)[res[0] mpsndarray];  // force completion
+            (void)[res[0] mpsndarray];
             double ms = std::chrono::duration<double, std::milli>(Clock::now() - s).count();
             etotal += ms; if (ms < ebest) ebest = ms;
           }

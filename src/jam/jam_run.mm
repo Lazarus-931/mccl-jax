@@ -1,5 +1,3 @@
-// jam_run.mm — runs a compiled jam program (its MPSGraph) on the Metal GPU.
-
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
@@ -27,14 +25,13 @@ MPSDataType MpsType(DType d) {
     case DType::kI16:  return MPSDataTypeInt16;
     case DType::kU16:  return MPSDataTypeUInt16;
     case DType::kI32:
-    case DType::kI64:  return MPSDataTypeInt32;   // i64 narrowed on device
+    case DType::kI64:  return MPSDataTypeInt32;
     case DType::kU32:
     case DType::kU64:  return MPSDataTypeUInt32;
-    default:           return MPSDataTypeFloat32;  // f32 / f64
+    default:           return MPSDataTypeFloat32;
   }
 }
 
-// Bytes per element on device (matches MpsType's narrowing of i64/u64/f64).
 std::size_t Width(DType d) {
   switch (d) {
     case DType::kI8: case DType::kU8: case DType::kPred: return 1;
@@ -52,16 +49,14 @@ std::size_t NumElems(const std::vector<int64_t>& dims) {
 NSArray<NSNumber*>* Shape(const std::vector<int64_t>& dims) {
   NSMutableArray<NSNumber*>* a = [NSMutableArray array];
   for (int64_t d : dims) [a addObject:@(d)];
-  if (a.count == 0) [a addObject:@1];  // rank-0 modeled as [1] (matches the lowering)
+  if (a.count == 0) [a addObject:@1];
   return a;
 }
 
-}  // namespace
+}
 
 namespace {
 
-// A device-buffer slot threaded between steps. `owned` slots are freed by the runner; program
-// inputs/outputs handed to the caller are not owned here.
 struct Slot {
   void* data = nullptr;
   void* handle = nullptr;
@@ -71,18 +66,11 @@ struct Slot {
 
 std::size_t SpecBytes(const IoSpec& s) { return NumElems(s.dims) * Width(s.dtype); }
 
-// One command queue reused across runs (Execute is serialized; creating a queue per call costs
-// ~200us). Process-lifetime, like the default device.
 id<MTLCommandQueue> SharedQueue() {
   static id<MTLCommandQueue> q = [MTLCreateSystemDefaultDevice() newCommandQueue];
   return q;
 }
 
-// A process-lifetime free-list of device buffers keyed by exact byte size. Training runs the same
-// program repeatedly with identical shapes, so the run-internal intermediate/gradient buffers recur
-// every step; recycling them removes ~2-5us/buffer of newBufferWithLength churn per step (tens of
-// buffers per segmented step). Buffers handed to the caller as program outputs leave the pool (the
-// caller frees them via metal::Release) — only run-internal intermediates are recycled here.
 class BufferPool {
  public:
   BufferPool() : enabled_(getenv("MCCL_JAX_NO_POOL") == nullptr) {}
@@ -105,13 +93,14 @@ class BufferPool {
     if (enabled_ && nbytes != 0) {
       std::lock_guard<std::mutex> lk(mu_);
       auto& v = free_[nbytes];
-      if (v.size() < kCapPerSize) { v.push_back({data, handle}); return; }
+      std::size_t cap = std::max<std::size_t>(2, std::min<std::size_t>(kCapPerSize, (std::size_t(32) << 20) / nbytes));
+      if (v.size() < cap) { v.push_back({data, handle}); return; }
     }
-    mccl_jax::metal::Release(handle);  // disabled, size 0, or this size's free-list is full → free to OS
+    mccl_jax::metal::Release(handle);
   }
 
  private:
-  static constexpr std::size_t kCapPerSize = 64;  // bounds memory if many distinct shapes appear
+  static constexpr std::size_t kCapPerSize = 64;
   const bool enabled_;
   std::mutex mu_;
   std::unordered_map<std::size_t, std::vector<mccl_jax::metal::Allocation>> free_;
@@ -122,16 +111,13 @@ BufferPool& Pool() {
   return p;
 }
 
-// Optional per-step timing (MCCL_JAX_TIME=1). The MPSGraph run and the collective call are both
-// synchronous, so wall time around each is its GPU/collective cost. Prints a cumulative breakdown
-// every 200 runs to stderr. Off by default (one getenv at first use).
 struct RunTimer {
   const bool on = getenv("MCCL_JAX_TIME") != nullptr;
   long runs = 0;
   double compute_ms = 0, collective_ms = 0, copy_ms = 0;
   double n_compute = 0, n_collective = 0;
   bool wall_set = false;
-  std::chrono::high_resolution_clock::time_point wall_start;  // first Run, for GPU-utilization
+  std::chrono::high_resolution_clock::time_point wall_start;
 };
 RunTimer& Timer() { static RunTimer t; return t; }
 using TClock = std::chrono::high_resolution_clock;
@@ -139,10 +125,8 @@ double MsSince(TClock::time_point t0) {
   return std::chrono::duration<double, std::milli>(TClock::now() - t0).count();
 }
 
+}
 
-}  // namespace
-
-// ---- segmented runner: compute steps run MPSGraphs over slots; collective steps run in place ----
 static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vector<RunInput>& inputs,
                                     std::vector<RunOutput>& outputs, const CollectiveFn& collective) {
   auto* impl = prog.impl();
@@ -158,9 +142,6 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     for (auto& s : slots) if (s.owned && s.handle) Pool().Recycle(s.handle, s.data, s.nbytes);
   };
 
-  // One-shot structural dump (MCCL_JAX_DUMP=1): the ordered step list with each step's slot
-  // reads/writes — reveals why deferred collectives flush (e.g. an update segment consuming a
-  // reduced gradient before the next reduction).
   static bool dumped = false;
   if (!dumped && getenv("MCCL_JAX_DUMP") != nullptr) {
     dumped = true;
@@ -182,12 +163,10 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     }
   }
 
-  // Only inputs whose slot a collective writes in place need a private copy (so the caller's buffer
-  // isn't mutated); every other input aliases the caller's buffer directly, avoiding a per-step copy.
   std::vector<char> collective_target(impl->num_slots, 0);
   for (const auto& step : impl->steps)
     if (step.kind == CompiledProgram::Impl::Step::kCollective)
-      collective_target[step.collective.recv_slot] = 1;  // slot a collective writes in place
+      collective_target[step.collective.recv_slot] = 1;
 
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     std::size_t want = SpecBytes(in_specs[i]);
@@ -204,14 +183,6 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     }
   }
 
-  // Size-aware deferred collective fusion (DEFAULT ON; disable with MCCL_JAX_NO_FUSE=1): small in-place
-  // collectives of identical config (biases, scalars — the per-call-overhead-bound ones) are batched
-  // into one transfer (memcpy gather → single collective → scatter), flushed before any step that
-  // reads/overwrites a pending slot. ONLY small buffers are fused (see kFuseMaxBytes): all buffers the
-  // cluster reduces are < mccl's METAL_MIN_BYTES (256MB) so mccl reduces them on the CPU, whose result
-  // is fusion-invariant → BYTE-EXACT (verified: checksum unchanged). Big weight all_reduces stay
-  // separate (their gather/scatter memcpy outweighs the saved call, and HoistCollectives already
-  // clusters them). Net: fewer mccl calls (e.g. 7→4 for dp_train), byte-exact.
   using Coll = CompiledProgram::Impl::Collective;
   const bool fuse_enabled = getenv("MCCL_JAX_NO_FUSE") == nullptr;
   std::vector<const Coll*> pending;
@@ -240,7 +211,7 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     mccl_jax::metal::Allocation scratch = Pool().Acquire(total * width);
     if (total != 0 && scratch.data == nullptr) { pending.clear(); return "jam run: fuse scratch alloc failed"; }
     std::size_t off = 0;
-    for (auto* c : pending) {  // gather each piece's local data into the contiguous scratch
+    for (auto* c : pending) {
       std::size_t n = (std::size_t)c->send_count * width;
       if (n) std::memcpy((char*)scratch.data + off, slots[c->send_slot].data, n);
       off += n;
@@ -251,7 +222,7 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     if (Timer().on) { Timer().collective_ms += MsSince(_ct); Timer().n_collective += 1; }
     if (e.empty()) {
       off = 0;
-      for (auto* c : pending) {  // scatter the reduced result back to each piece's slot
+      for (auto* c : pending) {
         std::size_t n = (std::size_t)c->send_count * width;
         if (n) std::memcpy(slots[c->send_slot].data, (char*)scratch.data + off, n);
         off += n;
@@ -266,23 +237,21 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     if (step.kind == CompiledProgram::Impl::Step::kCollective) {
       const auto& c = step.collective;
       bool inplace = (c.recv_slot == c.send_slot);
-      // Size-aware: defer only SMALL in-place collectives (biases, scalars). Their per-call mccl
-      // overhead dominates, and the gather/scatter memcpy to fuse them is cheap. Big buffers (weights)
-      // run separately — fusing them was measured slower (their memcpy outweighs the saved call).
-      constexpr std::size_t kFuseMaxBytes = 256 * 1024;
+
+      static const std::size_t kFuseMaxBytes = getenv("MCCL_JAX_FUSE_MAX_BYTES")
+          ? (std::size_t)std::atoll(getenv("MCCL_JAX_FUSE_MAX_BYTES")) : (std::size_t)(256 * 1024);
       bool small = (std::size_t)c.send_count * Width(c.dtype) <= kFuseMaxBytes;
       if (fuse_enabled && inplace && small && !pendingHas(c.send_slot) &&
           (pending.empty() || sameCfg(c, *pending[0]))) {
-        pending.push_back(&c);  // defer; flushed before its first consumer or at end of run
+        pending.push_back(&c);
         continue;
       }
-      // Run this one separately. Flush the deferred small batch only if THIS op touches a pending slot
-      // (independent big collectives don't — so the small batch keeps accumulating across them).
+
       if (pendingHas(c.send_slot) || (c.recv_slot != c.send_slot && pendingHas(c.recv_slot)))
         if (std::string fe = flush(); !fe.empty()) { freeOwned(); return fe; }
       void* send = slots[c.send_slot].data;
       void* recv = send;
-      if (c.recv_slot != c.send_slot) {  // shape-changing op: give it a fresh recv buffer
+      if (c.recv_slot != c.send_slot) {
         std::size_t nbytes = (std::size_t)c.recv_count * Width(c.dtype);
         Slot& rs = slots[c.recv_slot];
         if (rs.owned && rs.handle) Pool().Recycle(rs.handle, rs.data, rs.nbytes);
@@ -300,8 +269,8 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     }
     @autoreleasepool {
       const auto& c = step.compute;
-      if (c.outputs.count == 0) continue;  // empty (no-op) segment
-      if (!pending.empty()) {  // flush deferred collectives this segment depends on, before running it
+      if (c.outputs.count == 0) continue;
+      if (!pending.empty()) {
         bool dep = false;
         for (int s : c.input_slots) if (pendingHas(s)) { dep = true; break; }
         if (!dep) for (int s : c.output_slots) if (pendingHas(s)) { dep = true; break; }
@@ -317,8 +286,7 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
                                                                      dataType:MpsType(c.input_specs[i].dtype)];
         feeds[(MPSGraphTensor*)c.inputs[i]] = td;
       }
-      // Pre-allocate the output buffers and have MPSGraph write directly into them (resultsDictionary
-      // form), avoiding a per-output readBytes copy — the dominant cost for many-output segments.
+
       std::vector<mccl_jax::metal::Allocation> outAllocs(c.output_slots.size());
       NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* resultsDict =
           [NSMutableDictionary dictionary];
@@ -345,9 +313,8 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     }
   }
 
-  if (std::string fe = flush(); !fe.empty()) { freeOwned(); return fe; }  // any collectives whose result feeds an output
+  if (std::string fe = flush(); !fe.empty()) { freeOwned(); return fe; }
 
-  // Hand out program outputs from their slots, transferring ownership (clear `owned` so freeOwned skips).
   std::vector<RunOutput> out(out_specs.size());
   for (std::size_t i = 0; i < out_specs.size(); ++i) {
     int slot = impl->output_slots[i];
@@ -355,9 +322,9 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
     std::size_t nbytes = SpecBytes(out_specs[i]);
     if (s.owned) {
       out[i] = {s.data, s.handle, nbytes, out_specs[i].dims, out_specs[i].dtype};
-      s.owned = false;  // ownership moves to the output
+      s.owned = false;
     } else {
-      // Slot aliases a non-owned buffer (shouldn't happen with copy-in inputs); copy it out.
+
       mccl_jax::metal::Allocation a = Pool().Acquire(nbytes);
       if (nbytes != 0 && a.data == nullptr) { freeOwned(); return "jam run: output copy alloc failed"; }
       if (nbytes != 0) std::memcpy(a.data, s.data, nbytes);
@@ -379,13 +346,16 @@ static std::string RunSegmentedImpl(const CompiledProgram& prog, const std::vect
 std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs,
                 std::vector<RunOutput>& outputs, const CollectiveFn& collective) {
   if (!prog.impl()->steps.empty()) {
-    // Top-level pool drains any per-Run autoreleased Metal/MPS objects (the per-step pools only
-    // cover compute steps); bounds memory growth over long training runs.
+
     std::string err;
     @autoreleasepool { err = RunSegmentedImpl(prog, inputs, outputs, collective); }
     return err;
   }
   return Run(prog, inputs, outputs);
+}
+
+void RecycleDeviceBuffer(void* handle, void* data, std::size_t nbytes) {
+  Pool().Recycle(handle, data, nbytes);
 }
 
 std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs,
@@ -412,15 +382,14 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
       feeds[(MPSGraphTensor*)impl->inputs[i]] = td;
     }
 
-    // Pre-allocate outputs and let MPSGraph write directly into them (no readBytes copy).
     std::vector<RunOutput> out(out_specs.size());
     NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* resultsDict =
         [NSMutableDictionary dictionary];
     for (std::size_t i = 0; i < out_specs.size(); ++i) {
       std::size_t nbytes = NumElems(out_specs[i].dims) * Width(out_specs[i].dtype);
-      mccl_jax::metal::Allocation alloc = mccl_jax::metal::Allocate(nbytes);
+      mccl_jax::metal::Allocation alloc = Pool().Acquire(nbytes);
       if (nbytes != 0 && alloc.data == nullptr) {
-        for (auto& o : out) if (o.handle) mccl_jax::metal::Release(o.handle);
+        for (auto& o : out) if (o.handle) Pool().Recycle(o.handle, o.data, o.nbytes);
         return "jam run: output allocation failed";
       }
       out[i] = {alloc.data, alloc.handle, nbytes, out_specs[i].dims, out_specs[i].dtype};
@@ -435,8 +404,8 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
     if (Timer().on) {
       RunTimer& t = Timer();
       if (!t.wall_set) { t.wall_start = _t0; t.wall_set = true; }
-      t.copy_ms += std::chrono::duration<double, std::milli>(_t1 - _t0).count();  // feeds + output alloc
-      t.compute_ms += MsSince(_t1);                                               // GPU run
+      t.copy_ms += std::chrono::duration<double, std::milli>(_t1 - _t0).count();
+      t.compute_ms += MsSince(_t1);
       if (++t.runs % 50 == 0) {
         double wall = std::chrono::duration<double, std::milli>(TClock::now() - t.wall_start).count();
         fprintf(stderr, "[jam-time single] runs=%ld setup=%.3f gpu=%.3fms/run | in-jam %.0f%% of wall (gap=JAX/Python)\n",
@@ -449,4 +418,4 @@ std::string Run(const CompiledProgram& prog, const std::vector<RunInput>& inputs
   return "";
 }
 
-}  // namespace mccl_jax::jam
+}

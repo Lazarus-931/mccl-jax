@@ -1,6 +1,3 @@
-// ops/shape.mm — shape/layout ops: reshape, transpose, slice, dynamic_(update_)slice,
-// broadcast_in_dim, reverse, pad, iota, concatenate, bitcast_convert, convert.
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <cstdint>
@@ -20,7 +17,7 @@ namespace mccl_jax::jam {
 namespace {
 
 void Reshape(Lowering& L, mlir::Operation* op) {
-  if (op->getOperand(0).getType() == op->getResult(0).getType()) {  // no-op reshape: pass through
+  if (op->getOperand(0).getType() == op->getResult(0).getType()) {
     L.bind(op->getResult(0), A(L, op));
     L.substitute(op->getResult(0), op->getOperand(0));
     return;
@@ -34,7 +31,7 @@ void Transpose(Lowering& L, mlir::Operation* op) {
   bool identity = true;
   for (size_t i = 0; i < perm.size(); ++i)
     if (perm[i] != (int64_t)i) { identity = false; break; }
-  if (identity) {  // identity permutation: pass through
+  if (identity) {
     L.bind(op->getResult(0), A(L, op));
     L.substitute(op->getResult(0), op->getOperand(0));
     return;
@@ -51,7 +48,6 @@ void Slice(Lowering& L, mlir::Operation* op) {
                                 name:nil]);
 }
 
-// Read a constant scalar start index, clamped to [0, maxStart]; fails the lowering otherwise.
 bool ConstStart(Lowering& L, mlir::Value idx, int64_t maxStart, const char* what, int64_t* out) {
   auto cstOp = mlir::dyn_cast_or_null<mlir::stablehlo::ConstantOp>(idx.getDefiningOp());
   if (!cstOp) { L.fail(std::string("jam: ") + what + " with non-constant start index"); return false; }
@@ -62,19 +58,17 @@ bool ConstStart(Lowering& L, mlir::Value idx, int64_t maxStart, const char* what
   }
   int64_t s = (*ints.value_begin<llvm::APInt>()).getSExtValue();
   if (s < 0) s = 0;
-  if (s > maxStart) s = maxStart;  // clamp in-bounds per StableHLO
+  if (s > maxStart) s = maxStart;
   *out = s;
   return true;
 }
 
-// Is the value a compile-time-constant scalar integer?
 bool IsConstStart(mlir::Value idx) {
   auto cst = mlir::dyn_cast_or_null<mlir::stablehlo::ConstantOp>(idx.getDefiningOp());
   if (!cst) return false;
   return (bool)mlir::dyn_cast<mlir::DenseIntElementsAttr>(cst.getValue());
 }
 
-// Build a runtime 1-D i32 start tensor from the scalar start operands, each clamped to [0, maxStart_i].
 MPSGraphTensor* RuntimeStarts(Lowering& L, mlir::Operation* op, unsigned firstIdxOperand,
                               llvm::ArrayRef<int64_t> maxStart) {
   NSMutableArray<MPSGraphTensor*>* parts = [NSMutableArray array];
@@ -90,7 +84,6 @@ MPSGraphTensor* RuntimeStarts(Lowering& L, mlir::Operation* op, unsigned firstId
   return [L.graph() concatTensors:parts dimension:0 name:nil];
 }
 
-// dynamic_slice(operand, start...): constant starts → static slice, else tensor-indexed slice.
 void DynamicSlice(Lowering& L, mlir::Operation* op) {
   auto ds = mlir::cast<mlir::stablehlo::DynamicSliceOp>(op);
   llvm::ArrayRef<int64_t> inShape = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType()).getShape();
@@ -124,7 +117,6 @@ void DynamicSlice(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() sliceTensor:A(L, op) startTensor:starts sizeTensor:sizeT squeezeMask:0 name:nil]);
 }
 
-// dynamic_update_slice(operand, update, start...): constant starts → static, else runtime slice-update.
 void DynamicUpdateSlice(Lowering& L, mlir::Operation* op) {
   auto inTy = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType());
   auto upTy = mlir::cast<mlir::RankedTensorType>(op->getOperand(1).getType());
@@ -153,7 +145,7 @@ void DynamicUpdateSlice(Lowering& L, mlir::Operation* op) {
   std::vector<int64_t> maxStart;
   for (int64_t i = 0; i < rank; ++i) maxStart.push_back(inShape[i] - upShape[i]);
   MPSGraphTensor* starts = RuntimeStarts(L, op, 2, maxStart);
-  // ends = starts + update_shape (computed at runtime); strides = 1.
+
   NSMutableData* ud = [NSMutableData dataWithLength:rank * sizeof(int32_t)];
   int32_t* up = (int32_t*)[ud mutableBytes];
   for (int64_t i = 0; i < rank; ++i) up[i] = (int32_t)upShape[i];
@@ -168,7 +160,6 @@ void DynamicUpdateSlice(Lowering& L, mlir::Operation* op) {
                                     startMask:0 endMask:0 squeezeMask:0 name:nil]);
 }
 
-// broadcast_in_dim = reshape to output rank (1s in non-mapped dims) then broadcast.
 void BroadcastInDim(Lowering& L, mlir::Operation* op) {
   auto b = mlir::cast<mlir::stablehlo::BroadcastInDimOp>(op);
   llvm::ArrayRef<int64_t> bdims = b.getBroadcastDimensions();
@@ -185,7 +176,6 @@ void Reverse(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() reverseTensor:A(L, op) axes:IntArray(r.getDimensions()) name:nil]);
 }
 
-// Trace an SSA value back to a scalar splat constant through reshape/slice/broadcast/convert.
 bool TraceScalarConstant(Lowering& L, mlir::Value v, double* out, int depth = 0) {
   if (depth > 16) return false;
   v = L.resolve(v);
@@ -211,37 +201,51 @@ bool TraceScalarConstant(Lowering& L, mlir::Value v, double* out, int depth = 0)
   return false;
 }
 
-// pad: constant low/high + interior (dilation) padding. Negative (crop) padding still a gap.
 void Pad(Lowering& L, mlir::Operation* op) {
   auto p = mlir::cast<mlir::stablehlo::PadOp>(op);
   llvm::ArrayRef<int64_t> low = p.getEdgePaddingLow();
   llvm::ArrayRef<int64_t> high = p.getEdgePaddingHigh();
   llvm::ArrayRef<int64_t> interior = p.getInteriorPadding();
   for (int64_t v : interior) if (v < 0) { L.fail("jam: pad with negative interior padding unsupported"); return; }
-  for (int64_t v : low) if (v < 0) { L.fail("jam: pad with negative (crop) padding unsupported"); return; }
-  for (int64_t v : high) if (v < 0) { L.fail("jam: pad with negative (crop) padding unsupported"); return; }
   double fill = 0.0;
   if (!TraceScalarConstant(L, op->getOperand(1), &fill)) {
     L.fail("jam: pad with non-constant fill value");
     return;
   }
+  llvm::ArrayRef<int64_t> inShape = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType()).getShape();
+  int64_t rank = static_cast<int64_t>(inShape.size());
+  bool hasInterior = false; for (int64_t v : interior) if (v != 0) hasInterior = true;
+  bool hasNeg = false;
+  for (int64_t v : low) if (v < 0) hasNeg = true;
+  for (int64_t v : high) if (v < 0) hasNeg = true;
+
   MPSGraphTensor* t = A(L, op);
-  bool hasInterior = false;
-  for (int64_t v : interior) if (v != 0) hasInterior = true;
+  if (hasNeg) {
+    if (hasInterior) { L.fail("jam: pad with mixed negative-edge + interior padding unsupported"); return; }
+    std::vector<int64_t> starts(rank), ends(rank), strides(rank, 1);
+    for (int64_t d = 0; d < rank; ++d) {
+      starts[d] = low[d] < 0 ? -low[d] : 0;
+      ends[d] = inShape[d] - (high[d] < 0 ? -high[d] : 0);
+    }
+    t = [L.graph() sliceTensor:t starts:IntArray(starts) ends:IntArray(ends) strides:IntArray(strides) name:nil];
+  }
   if (hasInterior) {
-    std::vector<int64_t> shape(
-        mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType()).getShape());
+    std::vector<int64_t> shape(inShape.begin(), inShape.end());
     t = InteriorDilate(L, t, shape, interior, fill);
   }
-  Set(L, op, [L.graph() padTensor:t
-                 withPaddingMode:MPSGraphPaddingModeConstant
-                     leftPadding:IntArray(low)
-                    rightPadding:IntArray(high)
-                   constantValue:fill
-                            name:nil]);
+  std::vector<int64_t> lowPad(rank), highPad(rank);
+  bool anyPad = false;
+  for (int64_t d = 0; d < rank; ++d) {
+    lowPad[d] = low[d] > 0 ? low[d] : 0;
+    highPad[d] = high[d] > 0 ? high[d] : 0;
+    if (lowPad[d] || highPad[d]) anyPad = true;
+  }
+  if (anyPad)
+    t = [L.graph() padTensor:t withPaddingMode:MPSGraphPaddingModeConstant
+                     leftPadding:IntArray(lowPad) rightPadding:IntArray(highPad) constantValue:fill name:nil];
+  Set(L, op, t);
 }
 
-// iota: coordinate ramp along one axis, cast to the result dtype.
 void Iota(Lowering& L, mlir::Operation* op) {
   auto io = mlir::cast<mlir::stablehlo::IotaOp>(op);
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -258,25 +262,21 @@ void Concatenate(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() concatTensors:arr dimension:static_cast<int64_t>(c.getDimension()) name:nil]);
 }
 
-void BitcastConvert(Lowering& L, mlir::Operation* op) {  // same-width reinterpret
+void BitcastConvert(Lowering& L, mlir::Operation* op) {
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   Set(L, op, [L.graph() reinterpretCastTensor:A(L, op) toType:Lowering::MpsDType(rt.getElementType()) name:nil]);
 }
 
-void Convert(Lowering& L, mlir::Operation* op) {  // dtype cast
+void Convert(Lowering& L, mlir::Operation* op) {
   mlir::Type srcE = Lowering::ElementType(op->getOperand(0).getType());
   mlir::Type dstE = Lowering::ElementType(op->getResult(0).getType());
-  // Device no-op when both element types narrow to the same MPSDataType (e.g. f64->f32, i64->i32,
-  // or an identity f32->f32): skip the cast and pass the operand through.
+
   if (Lowering::MpsDType(srcE) == Lowering::MpsDType(dstE)) {
     L.bind(op->getResult(0), A(L, op));
     L.substitute(op->getResult(0), op->getOperand(0));
     return;
   }
-  // UNSIGNED int -> float: jam backs ui with a signed int, so castTensor treats high-bit values as
-  // negative (0x80000000 -> -2^31 instead of +2^31). Cast signed, then add 2^width wherever the
-  // result came out negative to recover the unsigned magnitude. Robust if the cast was already
-  // unsigned-correct (then there are no negatives and the select is a no-op).
+
   auto srcInt = mlir::dyn_cast<mlir::IntegerType>(srcE);
   bool dstFloat = dstE.isF32() || dstE.isF16() || dstE.isBF16();
   if (srcInt && srcInt.isUnsigned() && dstFloat) {
@@ -292,7 +292,7 @@ void Convert(Lowering& L, mlir::Operation* op) {  // dtype cast
   Set(L, op, [L.graph() castTensor:A(L, op) toType:Lowering::MpsDType(dstE) name:nil]);
 }
 
-}  // namespace
+}
 
 void RegisterShape() {
   RegisterOp("stablehlo.reshape", Reshape);
@@ -309,4 +309,4 @@ void RegisterShape() {
   RegisterOp("stablehlo.convert", Convert);
 }
 
-}  // namespace mccl_jax::jam
+}

@@ -5,7 +5,6 @@
 
 namespace mccl_collective {
 
-// Tiny local status type (no absl). ok==true is success; `message` describes a failure.
 struct Status {
   bool ok = true;
   std::string message;
@@ -19,4 +18,4 @@ struct Status {
   explicit operator bool() const { return ok; }
 };
 
-}  // namespace mccl_collective
+}

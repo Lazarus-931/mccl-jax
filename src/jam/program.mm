@@ -11,4 +11,4 @@ CompiledProgram& CompiledProgram::operator=(CompiledProgram&&) noexcept = defaul
 const std::vector<IoSpec>& CompiledProgram::inputs() const { return impl_->input_specs; }
 const std::vector<IoSpec>& CompiledProgram::outputs() const { return impl_->output_specs; }
 
-}  // namespace mccl_jax::jam
+}

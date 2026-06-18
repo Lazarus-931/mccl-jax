@@ -1,6 +1,3 @@
-// ops/control_flow.mm — while / if / case via MPSGraph control-flow nodes.
-// Region blocks are re-walked with WalkBlock; case folds to a chain of nested ifs.
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <vector>
@@ -25,9 +22,8 @@ mlir::ModuleOp ModuleOf(mlir::Operation* op) {
   return op->getParentOfType<mlir::ModuleOp>();
 }
 
-constexpr int64_t kMaxUnroll = 2048;  // cap on unrolled trip count (else fail cleanly, never OOM/crash)
+constexpr int64_t kMaxUnroll = 2048;
 
-// A scalar integer stablehlo.constant value (after seeing through convert), else false.
 bool ConstInt(mlir::Value v, int64_t* out) {
   mlir::Operation* def = v.getDefiningOp();
   while (def && mlir::isa<mlir::stablehlo::ConvertOp>(def)) def = def->getOperand(0).getDefiningOp();
@@ -39,8 +35,6 @@ bool ConstInt(mlir::Value v, int64_t* out) {
   return true;
 }
 
-// MPSGraph's `while` SIGSEGVs when the body contains dynamic_slice / dynamic_update_slice (the scan
-// stacking pattern). Detect that so we can unroll instead.
 bool BodyHasDynamicIndexing(mlir::Region& body) {
   bool found = false;
   body.walk([&](mlir::Operation* o) {
@@ -50,8 +44,6 @@ bool BodyHasDynamicIndexing(mlir::Region& body) {
   return found;
 }
 
-// Static trip count of a canonical counted loop (counter: const init, cond `counter </<= constN`,
-// body returns `counter + constStep`), else -1. This is exactly what jax.lax.scan emits.
 int64_t StaticTripCount(mlir::stablehlo::WhileOp wh) {
   mlir::Block& cond = wh.getCond().front();
   mlir::Block& body = wh.getBody().front();
@@ -84,13 +76,11 @@ int64_t StaticTripCount(mlir::stablehlo::WhileOp wh) {
   return n < 0 ? 0 : n;
 }
 
-// Bind op's results to the MPSGraph tensors in an NSArray.
 void BindResults(Lowering& L, mlir::Operation* op, NSArray<MPSGraphTensor*>* results) {
   unsigned n = op->getNumResults();
   for (unsigned i = 0; i < n && i < results.count; ++i) L.bind(op->getResult(i), results[i]);
 }
 
-// Walk a single-block region, returning the MPSGraph tensors for its yielded (return) values.
 NSArray<MPSGraphTensor*>* WalkRegion(Lowering& L, mlir::Operation* op, mlir::Region& region) {
   std::vector<mlir::Value> rets;
   WalkBlock(L, ModuleOf(op), region.front(), rets);
@@ -102,7 +92,6 @@ NSArray<MPSGraphTensor*>* WalkRegion(Lowering& L, mlir::Operation* op, mlir::Reg
   return out;
 }
 
-// if(pred) then region0 else region1.  pred is a scalar bool tensor.
 void If(Lowering& L, mlir::Operation* op) {
   auto ifOp = mlir::cast<mlir::stablehlo::IfOp>(op);
   MPSGraphTensor* pred = L.value(op->getOperand(0));
@@ -118,7 +107,6 @@ void If(Lowering& L, mlir::Operation* op) {
   BindResults(L, op, results);
 }
 
-// case(index): clamped to [0, n-1] (XLA), built as a right-folded chain of `if (index == k)`.
 void Case(Lowering& L, mlir::Operation* op) {
   auto caseOp = mlir::cast<mlir::stablehlo::CaseOp>(op);
   MPSGraphTensor* index = L.value(op->getOperand(0));
@@ -126,11 +114,9 @@ void Case(Lowering& L, mlir::Operation* op) {
   unsigned n = caseOp.getBranches().size();
   if (n == 0) { L.fail("jam: case with no branches"); return; }
 
-  // Walk the last branch as the base of the fold (covers index >= n-1, the clamp).
   __block std::vector<mlir::Region*> regions;
   for (mlir::Region& r : caseOp.getBranches()) regions.push_back(&r);
 
-  // Build nested ifs from the last branch backward.
   NSArray<MPSGraphTensor*>* acc = WalkRegion(L, op, *regions[n - 1]);
   if (!L.ok()) return;
   for (int k = (int)n - 2; k >= 0; --k) {
@@ -148,7 +134,6 @@ void Case(Lowering& L, mlir::Operation* op) {
   BindResults(L, op, acc);
 }
 
-// while(carry): cond region yields a scalar bool; body region yields the next carry.
 void While(Lowering& L, mlir::Operation* op) {
   auto wh = mlir::cast<mlir::stablehlo::WhileOp>(op);
   mlir::Region& condR = wh.getCond();
@@ -157,10 +142,6 @@ void While(Lowering& L, mlir::Operation* op) {
   mlir::Block& condBlock = condR.front();
   mlir::Block& bodyBlock = bodyR.front();
 
-  // MPSGraph's native `while` SIGSEGVs on bodies with dynamic_slice/dynamic_update_slice (the
-  // jax.lax.scan stacking pattern). For a statically counted loop, unroll instead: the dynamic ops
-  // then live in the main graph (where they run fine) and there is no MPSGraph while. fori-style
-  // loops (no dynamic indexing) keep the native while below.
   if (BodyHasDynamicIndexing(bodyR)) {
     int64_t trip = StaticTripCount(wh);
     if (trip < 0 || trip > kMaxUnroll) {
@@ -188,7 +169,6 @@ void While(Lowering& L, mlir::Operation* op) {
     return;
   }
 
-  // Initial carry = the while's operands.
   NSMutableArray<MPSGraphTensor*>* init = [NSMutableArray array];
   for (mlir::Value v : op->getOperands()) [init addObject:L.value(v)];
   if (!L.ok()) return;
@@ -196,13 +176,13 @@ void While(Lowering& L, mlir::Operation* op) {
   NSArray<MPSGraphTensor*>* results = [L.graph()
       whileWithInitialInputs:init
       before:^(NSArray<MPSGraphTensor*>* inputs, NSMutableArray<MPSGraphTensor*>* out) {
-        // bind carry args, evaluate cond → predicate, forward the carry to the after-block.
+
         for (unsigned i = 0; i < nCarry; ++i)
           L.bind(condBlock.getArgument(i), inputs[i]);
         std::vector<mlir::Value> condRets;
         WalkBlock(L, ModuleOf(op), condBlock, condRets);
         MPSGraphTensor* pred = condRets.empty() ? nil : L.value(condRets[0]);
-        for (MPSGraphTensor* t : inputs) [out addObject:t];  // forward carry unchanged
+        for (MPSGraphTensor* t : inputs) [out addObject:t];
         return pred;
       }
       after:^NSArray<MPSGraphTensor*>*(NSArray<MPSGraphTensor*>* bodyArgs) {
@@ -213,7 +193,7 @@ void While(Lowering& L, mlir::Operation* op) {
         NSMutableArray<MPSGraphTensor*>* next = [NSMutableArray array];
         for (mlir::Value v : bodyRets) {
           MPSGraphTensor* t = L.value(v);
-          if (!t) { L.fail("jam: while body produced an unbound value"); return bodyArgs; }  // keep carry size; bail after
+          if (!t) { L.fail("jam: while body produced an unbound value"); return bodyArgs; }
           [next addObject:t];
         }
         return next;
@@ -223,7 +203,7 @@ void While(Lowering& L, mlir::Operation* op) {
   BindResults(L, op, results);
 }
 
-}  // namespace
+}
 
 void RegisterControlFlow() {
   RegisterOp("stablehlo.if", If);
@@ -231,4 +211,4 @@ void RegisterControlFlow() {
   RegisterOp("stablehlo.while", While);
 }
 
-}  // namespace mccl_jax::jam
+}

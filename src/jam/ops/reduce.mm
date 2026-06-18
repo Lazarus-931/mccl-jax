@@ -1,5 +1,3 @@
-// ops/reduce.mm — reduce, variadic argmax/argmin, and reduce_window (cumsum/cumprod, 2D pooling).
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <cstdint>
@@ -19,7 +17,6 @@
 namespace mccl_jax::jam {
 namespace {
 
-// First non-terminator op inside a single-block reducer/window region.
 mlir::Operation* FirstBodyOp(mlir::Region& region) {
   if (region.empty()) return nullptr;
   for (mlir::Operation& inner : region.front()) {
@@ -29,7 +26,6 @@ mlir::Operation* FirstBodyOp(mlir::Region& region) {
   return nullptr;
 }
 
-// Detect the variadic argmax/argmin reduce (GT ⇒ argmax, LT ⇒ argmin); sets *isMax/*axis.
 bool DetectArgReduce(mlir::stablehlo::ReduceOp red, bool* isMax, int64_t* axis) {
   if (red->getNumOperands() != 4 || red->getNumResults() != 2) return false;
   llvm::ArrayRef<int64_t> dims = red.getDimensions();
@@ -49,14 +45,11 @@ bool DetectArgReduce(mlir::stablehlo::ReduceOp red, bool* isMax, int64_t* axis) 
 void Reduce(Lowering& L, mlir::Operation* op) {
   auto red = mlir::cast<mlir::stablehlo::ReduceOp>(op);
 
-  // argmax/argmin: variadic reduce over (values, iota) → (value, index).
   bool isMax = false;
   int64_t argAxis = 0;
   if (DetectArgReduce(red, &isMax, &argAxis)) {
-    MPSGraphTensor* a = L.value(op->getOperand(0));  // the values input
-    // Unsigned values: MPSGraph's arg reductions ASSERT on a uint source, so map unsigned order onto
-    // signed order by flipping the MSB (xor) — then signed max/argmax give the unsigned result. Flip
-    // the max value back at the end. (Same trick as the unsigned Compare.)
+    MPSGraphTensor* a = L.value(op->getOperand(0));
+
     MPSDataType uty;
     bool uns = UnsignedIntOperand(op, 0, uty);
     MPSGraphTensor* msb = nil;
@@ -73,7 +66,7 @@ void Reduce(Lowering& L, mlir::Operation* op) {
         : [L.graph() reductionArgMinimumWithTensor:a axis:argAxis name:nil];
 
     auto vt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (uns) val = [L.graph() bitwiseXORWithPrimaryTensor:val secondaryTensor:msb name:nil];  // flip back
+    if (uns) val = [L.graph() bitwiseXORWithPrimaryTensor:val secondaryTensor:msb name:nil];
     Set(L, op, Reshaped(L, val, vt.getShape()));
 
     auto it = mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
@@ -83,7 +76,6 @@ void Reduce(Lowering& L, mlir::Operation* op) {
     return;
   }
 
-  // Plain reduction: detect the reducer op from the region body.
   mlir::Operation* body = FirstBodyOp(red.getBody());
   if (!body) { L.fail("jam: reduce with empty reducer body"); return; }
   llvm::StringRef rk = body->getName().getStringRef();
@@ -97,10 +89,8 @@ void Reduce(Lowering& L, mlir::Operation* op) {
   else if (rk == "stablehlo.or") kind = kOr;
   else { L.fail("jam: unsupported reduce body op '" + rk.str() + "'"); return; }
 
-  // MPSGraph reductions keep the reduced dim (size 1); reshape to the result shape after.
   MPSGraphTensor* acc = L.value(op->getOperand(0));
-  // Unsigned max/min reduction: reinterpret to unsigned (signed reduce picks wrong for high-bit
-  // values). add/mul are bit-identical signed/unsigned; and/or are bitwise — all unaffected.
+
   MPSDataType uty;
   bool uns = (kind == kMax || kind == kMin) && UnsignedIntOperand(op, 0, uty);
   if (uns) acc = [L.graph() reinterpretCastTensor:acc toType:uty name:nil];
@@ -124,7 +114,6 @@ static bool AllOnes(std::optional<llvm::ArrayRef<int64_t>> a) {
   return true;
 }
 
-// reduce_window cumulative form: full-extent window on one axis ⇒ cumsum (add) / cumprod (multiply).
 static bool TryCumulative(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceWindowOp rw,
                           bool isAdd, bool isMul, bool isMax, bool isMin) {
   if (!isAdd && !isMul && !isMax && !isMin) return false;
@@ -167,7 +156,6 @@ static bool TryCumulative(Lowering& L, mlir::Operation* op, mlir::stablehlo::Red
   return true;
 }
 
-// reduce_window 2D pooling (NHWC): body maximum ⇒ max-pool, add ⇒ sum-pool (avgPool * area).
 static bool TryPool2D(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceWindowOp rw,
                       bool isAdd, bool isMax) {
   if (!isAdd && !isMax) return false;
@@ -175,14 +163,13 @@ static bool TryPool2D(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceW
   if (wd.size() != 4) return false;
   if (!AllOnes(rw.getBaseDilations()) || !AllOnes(rw.getWindowDilations())) return false;
 
-  // pooling dims = the two with window > 1 (or, for a degenerate all-ones window, dims 1,2).
   std::vector<int> poolDims;
   for (int i = 0; i < 4; ++i) if (wd[i] != 1) poolDims.push_back(i);
   if (poolDims.empty()) { poolDims = {1, 2}; }
-  if (poolDims.size() != 2 || poolDims[0] != 1 || poolDims[1] != 2) return false;  // NHWC only
+  if (poolDims.size() != 2 || poolDims[0] != 1 || poolDims[1] != 2) return false;
 
   int64_t kh = wd[1], kw = wd[2];
-  int64_t sh = 1, sw = 1;  // StableHLO window_strides default is all-1s (omitted ⇒ stride 1)
+  int64_t sh = 1, sw = 1;
   if (auto s = rw.getWindowStrides()) {
     auto sr = *s;
     if (sr.size() == 4) { if (sr[0] != 1 || sr[3] != 1) return false; sh = sr[1]; sw = sr[2]; }
@@ -192,7 +179,7 @@ static bool TryPool2D(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceW
     std::vector<int64_t> pv;
     for (const llvm::APInt& v : padAttr->getValues<llvm::APInt>()) pv.push_back(v.getSExtValue());
     if (pv.size() != 8) return false;
-    if (pv[0] != 0 || pv[1] != 0 || pv[6] != 0 || pv[7] != 0) return false;  // no N/C padding
+    if (pv[0] != 0 || pv[1] != 0 || pv[6] != 0 || pv[7] != 0) return false;
     padTop = pv[2]; padBottom = pv[3]; padLeft = pv[4]; padRight = pv[5];
   }
 
@@ -213,7 +200,7 @@ static bool TryPool2D(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceW
   if (isMax) {
     Set(L, op, [L.graph() maxPooling2DWithSourceTensor:a descriptor:desc name:nil]);
   } else {
-    desc.includeZeroPadToAverage = YES;  // divide by full window area, so avg*area = sum
+    desc.includeZeroPadToAverage = YES;
     MPSGraphTensor* avg = [L.graph() avgPooling2DWithSourceTensor:a descriptor:desc name:nil];
     MPSGraphTensor* area = [L.graph() constantWithScalar:(double)(kh * kw) dataType:avg.dataType];
     Set(L, op, [L.graph() multiplicationWithPrimaryTensor:avg secondaryTensor:area name:nil]);
@@ -221,7 +208,6 @@ static bool TryPool2D(Lowering& L, mlir::Operation* op, mlir::stablehlo::ReduceW
   return true;
 }
 
-// reduce_window: cumulative sum/product and 2D max-/sum-pooling; other forms fail.
 void ReduceWindow(Lowering& L, mlir::Operation* op) {
   auto rw = mlir::cast<mlir::stablehlo::ReduceWindowOp>(op);
   if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
@@ -241,11 +227,11 @@ void ReduceWindow(Lowering& L, mlir::Operation* op) {
   L.fail("jam: reduce_window: only cumulative (cumsum/cumprod/cummax/cummin) and 2D max/sum pooling supported");
 }
 
-}  // namespace
+}
 
 void RegisterReduce() {
   RegisterOp("stablehlo.reduce", Reduce);
   RegisterOp("stablehlo.reduce_window", ReduceWindow);
 }
 
-}  // namespace mccl_jax::jam
+}
