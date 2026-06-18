@@ -2,14 +2,12 @@
 
 #include <string>
 
-// libmccl public API.
 #include "mccl.h"
 
 namespace mccl_collective {
 
 namespace {
 
-// Map this module's DType -> mccl::mcclDataType.
 mccl::mcclDataType ToMccl(DType dt) {
   switch (dt) {
     case DType::kInt8:     return mccl::mcclInt8;
@@ -23,10 +21,9 @@ mccl::mcclDataType ToMccl(DType dt) {
     case DType::kFloat32:  return mccl::mcclFloat32;
     case DType::kFloat64:  return mccl::mcclFloat64;
   }
-  return mccl::mcclFloat32;  // unreachable; keeps the compiler happy
+  return mccl::mcclFloat32;
 }
 
-// Map this module's ReduceOp -> mccl::mcclRedOp.
 mccl::mcclRedOp ToMccl(ReduceOp op) {
   switch (op) {
     case ReduceOp::kSum:  return mccl::mcclSum;
@@ -35,17 +32,15 @@ mccl::mcclRedOp ToMccl(ReduceOp op) {
     case ReduceOp::kMin:  return mccl::mcclMin;
     case ReduceOp::kAvg:  return mccl::mcclAvg;
   }
-  return mccl::mcclSum;  // unreachable
+  return mccl::mcclSum;
 }
 
-// Turn an mcclResult into a Status (ok on mcclSuccess).
 Status FromResult(const char* op, mccl::mcclResult r) {
   if (r == mccl::mcclSuccess) return Status::Ok();
   return Status::Error(std::string(op) + ": " + mccl::mcclResultStr(r) +
                        " (code " + std::to_string(static_cast<int>(r)) + ")");
 }
 
-// Common guard shared by all collectives.
 Status CheckArgs(const char* op, Comm& comm, const void* data,
                   std::size_t count) {
   if (comm.handle() == nullptr) {
@@ -57,7 +52,7 @@ Status CheckArgs(const char* op, Comm& comm, const void* data,
   return Status::Ok();
 }
 
-}  // namespace
+}
 
 std::size_t DTypeSize(DType dt) {
   return mccl::mcclDataSize(ToMccl(dt));
@@ -67,7 +62,7 @@ Status AllReduce(Comm& comm, void* data, std::size_t count, DType dt,
                  ReduceOp op) {
   Status s = CheckArgs("AllReduce", comm, data, count);
   if (!s) return s;
-  // In place: sendbuff == recvbuff == data.
+
   return FromResult("AllReduce",
                     mccl::mcclAllReduce(comm.handle(), data, data, count,
                                         ToMccl(dt), ToMccl(op)));
@@ -107,14 +102,13 @@ Status AllToAll(Comm& comm, void* data, std::size_t count, DType dt) {
                                        ToMccl(dt)));
 }
 
-// ---- out-of-place forms (send != recv) ----
 namespace {
 Status CheckArgs2(const char* op, Comm& comm, const void* send, const void* recv) {
   if (comm.handle() == nullptr) return Status::Error(std::string(op) + ": comm has no handle");
   if (send == nullptr || recv == nullptr) return Status::Error(std::string(op) + ": null buffer");
   return Status::Ok();
 }
-}  // namespace
+}
 
 Status AllReduce(Comm& comm, const void* send, void* recv, std::size_t count, DType dt, ReduceOp op) {
   Status s = CheckArgs2("AllReduce", comm, send, recv);
@@ -154,11 +148,11 @@ Status AllToAll(Comm& comm, const void* send, void* recv, std::size_t count, DTy
 Status Permute(Comm& comm, const void* send, void* recv, std::size_t count, DType dt,
                int target, int source) {
   if (comm.handle() == nullptr) return Status::Error("Permute: comm has no handle");
-  // Group the send + recv so peer ranks' matching calls rendezvous instead of deadlocking.
+
   mccl::mcclGroupStart();
   if (target >= 0) mccl::mcclSend(comm.handle(), send, count, ToMccl(dt), target);
   if (source >= 0) mccl::mcclRecv(comm.handle(), recv, count, ToMccl(dt), source);
   return FromResult("Permute", mccl::mcclGroupEnd());
 }
 
-}  // namespace mccl_collective
+}

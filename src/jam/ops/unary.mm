@@ -1,5 +1,3 @@
-// ops/unary.mm — single-operand StableHLO + CHLO elementwise ops → MPSGraph.
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include "mlir/IR/Operation.h"
@@ -8,7 +6,6 @@
 namespace mccl_jax::jam {
 namespace {
 
-// --- direct MPSGraph unary selectors ---
 void Floor(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() floorWithTensor:A(L, op) name:nil]);
 }
@@ -18,10 +15,10 @@ void Ceil(Lowering& L, mlir::Operation* op) {
 void Sign(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() signWithTensor:A(L, op) name:nil]);
 }
-void RoundEven(Lowering& L, mlir::Operation* op) {  // round-half-to-even
+void RoundEven(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() rintWithTensor:A(L, op) name:nil]);
 }
-void RoundAfz(Lowering& L, mlir::Operation* op) {  // round-half-away-from-zero
+void RoundAfz(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() roundWithTensor:A(L, op) name:nil]);
 }
 void Sine(Lowering& L, mlir::Operation* op) {
@@ -37,19 +34,18 @@ void Popcnt(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() bitwisePopulationCountWithTensor:A(L, op) name:nil]);
 }
 
-// --- composed unary ---
-void Expm1(Lowering& L, mlir::Operation* op) {  // exp(x) - 1
+void Expm1(Lowering& L, mlir::Operation* op) {
   MPSGraphTensor* e = [L.graph() exponentWithTensor:A(L, op) name:nil];
   MPSGraphTensor* one = [L.graph() constantWithScalar:1.0 dataType:e.dataType];
   Set(L, op, [L.graph() subtractionWithPrimaryTensor:e secondaryTensor:one name:nil]);
 }
-void Log1p(Lowering& L, mlir::Operation* op) {  // log(1 + x)
+void Log1p(Lowering& L, mlir::Operation* op) {
   MPSGraphTensor* a = A(L, op);
   MPSGraphTensor* one = [L.graph() constantWithScalar:1.0 dataType:a.dataType];
   MPSGraphTensor* s = [L.graph() additionWithPrimaryTensor:a secondaryTensor:one name:nil];
   Set(L, op, [L.graph() logarithmWithTensor:s name:nil]);
 }
-void Cbrt(Lowering& L, mlir::Operation* op) {  // sign(x) * |x|^(1/3)
+void Cbrt(Lowering& L, mlir::Operation* op) {
   MPSGraphTensor* a = A(L, op);
   MPSGraphTensor* sgn = [L.graph() signWithTensor:a name:nil];
   MPSGraphTensor* mag = [L.graph() absoluteWithTensor:a name:nil];
@@ -57,7 +53,7 @@ void Cbrt(Lowering& L, mlir::Operation* op) {  // sign(x) * |x|^(1/3)
   MPSGraphTensor* p = [L.graph() powerWithPrimaryTensor:mag secondaryTensor:third name:nil];
   Set(L, op, [L.graph() multiplicationWithPrimaryTensor:sgn secondaryTensor:p name:nil]);
 }
-void IsFinite(Lowering& L, mlir::Operation* op) {  // !(isInf || isNaN)
+void IsFinite(Lowering& L, mlir::Operation* op) {
   MPSGraphTensor* a = A(L, op);
   MPSGraphTensor* inf = [L.graph() isInfiniteWithTensor:a name:nil];
   MPSGraphTensor* nan = [L.graph() isNaNWithTensor:a name:nil];
@@ -65,7 +61,7 @@ void IsFinite(Lowering& L, mlir::Operation* op) {  // !(isInf || isNaN)
   Set(L, op, [L.graph() notWithTensor:bad name:nil]);
 }
 void Not(Lowering& L, mlir::Operation* op) {
-  // stablehlo.not is logical-not on bool, bitwise-not on integers.
+
   MPSGraphTensor* a = A(L, op);
   if (Lowering::ElementType(op->getOperand(0).getType()).isInteger(1))
     Set(L, op, [L.graph() notWithTensor:a name:nil]);
@@ -73,7 +69,6 @@ void Not(Lowering& L, mlir::Operation* op) {
     Set(L, op, [L.graph() bitwiseNOTWithTensor:a name:nil]);
 }
 
-// --- CHLO transcendental unary (JAX keeps these in the CHLO dialect) ---
 void Erf(Lowering& L, mlir::Operation* op)   { Set(L, op, [L.graph() erfWithTensor:A(L, op) name:nil]); }
 void Asin(Lowering& L, mlir::Operation* op)  { Set(L, op, [L.graph() asinWithTensor:A(L, op) name:nil]); }
 void Acos(Lowering& L, mlir::Operation* op)  { Set(L, op, [L.graph() acosWithTensor:A(L, op) name:nil]); }
@@ -84,7 +79,7 @@ void Asinh(Lowering& L, mlir::Operation* op) { Set(L, op, [L.graph() asinhWithTe
 void Acosh(Lowering& L, mlir::Operation* op) { Set(L, op, [L.graph() acoshWithTensor:A(L, op) name:nil]); }
 void Atanh(Lowering& L, mlir::Operation* op) { Set(L, op, [L.graph() atanhWithTensor:A(L, op) name:nil]); }
 
-}  // namespace
+}
 
 void RegisterUnary() {
   RegisterOp("stablehlo.floor", Floor);
@@ -113,4 +108,4 @@ void RegisterUnary() {
   RegisterOp("chlo.tan", Tan);
 }
 
-}  // namespace mccl_jax::jam
+}

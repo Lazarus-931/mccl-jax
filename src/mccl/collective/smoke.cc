@@ -1,6 +1,3 @@
-// Single-rank smoke test: a 1-rank sum-AllReduce is the identity, so the buffer is unchanged.
-// Run with MCCL_METAL_DIR=~/mccl/src/device pointing at the kernels.
-
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -16,7 +13,7 @@ using mccl_collective::ReduceOp;
 
 int main() {
   std::string err;
-  std::unique_ptr<Comm> comm = Comm::Create(/*n_ranks=*/1, /*rank=*/0, &err);
+  std::unique_ptr<Comm> comm = Comm::Create(1, 0, &err);
   if (comm == nullptr) {
     std::printf("FAIL: Comm::Create(1, 0): %s\n", err.c_str());
     return 1;
@@ -25,7 +22,7 @@ int main() {
               comm->n_ranks());
 
   std::vector<float> buf = {1.0f, 2.0f, 3.0f, 4.0f};
-  const std::vector<float> expected = buf;  // single-rank sum == identity
+  const std::vector<float> expected = buf;
 
   auto s = AllReduce(*comm, buf.data(), buf.size(), DType::kFloat32,
                      ReduceOp::kSum);

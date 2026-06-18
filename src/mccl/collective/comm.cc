@@ -5,21 +5,19 @@
 
 #include "bootstrap.h"
 
-// libmccl public API.
 #include "mccl.h"
 
 namespace mccl_collective {
 
 namespace {
 
-// Append the mccl error string for `r` to `*err` (when err is non-null).
 void SetErr(std::string* err, const std::string& context, mccl::mcclResult r) {
   if (err == nullptr) return;
   *err = context + ": " + mccl::mcclResultStr(r) + " (code " +
          std::to_string(static_cast<int>(r)) + ")";
 }
 
-}  // namespace
+}
 
 std::unique_ptr<Comm> Comm::Create(int n_ranks, int rank, std::string* err) {
   if (n_ranks < 1 || rank < 0 || rank >= n_ranks) {
@@ -30,7 +28,6 @@ std::unique_ptr<Comm> Comm::Create(int n_ranks, int rank, std::string* err) {
     return nullptr;
   }
 
-  // mcclGetUniqueId packs MCCL_BOOTSTRAP_IP / MCCL_BOOTSTRAP_PORT from the env.
   mccl::mcclUniqueId id{};
   mccl::mcclResult rc = mccl::mcclGetUniqueId(&id);
   if (rc != mccl::mcclSuccess) {
@@ -46,7 +43,6 @@ std::unique_ptr<Comm> Comm::Create(int n_ranks, int rank, std::string* err) {
     return nullptr;
   }
 
-  // std::make_unique can't reach the private ctor; construct directly.
   return std::unique_ptr<Comm>(new Comm(comm, n_ranks, rank));
 }
 
@@ -83,4 +79,4 @@ Comm& Comm::operator=(Comm&& other) noexcept {
   return *this;
 }
 
-}  // namespace mccl_collective
+}

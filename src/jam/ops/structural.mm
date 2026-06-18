@@ -1,5 +1,3 @@
-// ops/structural.mm — constant (dense + splat, incl. non-finite ±inf/nan).
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <cstdint>
@@ -21,7 +19,6 @@
 namespace mccl_jax::jam {
 namespace {
 
-// Encode a float as IEEE half (truncating the mantissa; subnormal-flush + inf/overflow).
 uint16_t FloatToHalf(float f) {
   uint32_t x;
   std::memcpy(&x, &f, 4);
@@ -51,7 +48,6 @@ void Constant(Lowering& L, mlir::Operation* op) {
   if (!attr) { L.fail("jam: constant without dense value attribute"); return; }
   bool isFP = mlir::isa<mlir::FloatType>(elem);
 
-  // Splat: one MPSGraph scalar constant broadcast to the shape (handles ±inf/nan).
   if (attr.isSplat()) {
     double v = isFP ? attr.getSplatValue<llvm::APFloat>().convertToDouble()
                     : static_cast<double>(attr.getSplatValue<llvm::APInt>().getSExtValue());
@@ -59,7 +55,6 @@ void Constant(Lowering& L, mlir::Operation* op) {
     return;
   }
 
-  // Dense: pack raw little-endian bytes in the device dtype, then constantWithData.
   int64_t n = rt.getNumElements();
   size_t bytes = (mps == MPSDataTypeFloat32 || mps == MPSDataTypeInt32) ? 4
                : (mps == MPSDataTypeFloat16 || mps == MPSDataTypeBFloat16) ? 2
@@ -89,9 +84,6 @@ void Constant(Lowering& L, mlir::Operation* op) {
   Set(L, op, [L.graph() constantWithData:nd shape:mshape dataType:mps]);
 }
 
-// ---- deprecated ops (safety net; normalization usually rewrites these first) ----
-
-// stablehlo.broadcast: prepend `broadcast_sizes` leading dims, then broadcast to out shape.
 void Broadcast(Lowering& L, mlir::Operation* op) {
   auto b = mlir::cast<mlir::stablehlo::BroadcastOp>(op);
   llvm::ArrayRef<int64_t> sizes = b.getBroadcastSizes();
@@ -103,11 +95,11 @@ void Broadcast(Lowering& L, mlir::Operation* op) {
   Set(L, op, Broadcasted(L, r, OutShape(op)));
 }
 
-}  // namespace
+}
 
 void RegisterStructural() {
   RegisterOp("stablehlo.constant", Constant);
   RegisterOp("stablehlo.broadcast", Broadcast);
 }
 
-}  // namespace mccl_jax::jam
+}

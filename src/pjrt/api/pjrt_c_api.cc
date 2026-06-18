@@ -1,14 +1,11 @@
-// mccl-jax PJRT plugin — implementation of the PJRT C API.
-// Implemented entry points translate C args to/from the internal model; the rest are stubs.
-
 #include "src/pjrt/api/pjrt_c_api.h"
 #include "src/execution/metal_buffer.h"
 
 #ifdef MCCL_JAX_WITH_JAM
-// jam (StableHLO -> MPSGraph) + the execution shim; compiled in only when built with jam.
+
 #include "src/jam/jam.h"
 #include "src/jam/jam_run.h"
-// mccl collective layer: the multi-host all_reduce backend.
+
 #include "src/mccl/collective/comm.h"
 #include "src/mccl/collective/collectives.h"
 #endif
@@ -41,15 +38,14 @@ struct PJRT_Device {
   PJRT_DeviceDescription description;
   PJRT_Client* client = nullptr;
   int local_hardware_id = 0;
-  bool addressable = true;                // false for remote ranks in a multi-host mesh
-  std::vector<PJRT_Memory*> memories;     // MPS + CPU
-  PJRT_Memory* default_memory = nullptr;  // MPS
+  bool addressable = true;
+  std::vector<PJRT_Memory*> memories;
+  PJRT_Memory* default_memory = nullptr;
 };
 
-// MPS (Metal GPU) and CPU (host) memory spaces; both UMA on Apple Silicon.
 struct PJRT_Memory {
   int id = 0;
-  std::string kind;  // "device" (MPS) | "pinned_host" (CPU)
+  std::string kind;
   int kind_id = 0;
   std::string debug_string;
   std::string to_string;
@@ -59,38 +55,36 @@ struct PJRT_Memory {
 struct PJRT_TopologyDescription {
   std::string platform_name = "metal";
   std::string platform_version = "mccl-jax 0.0.1 (PJRT 0.55)";
-  std::vector<std::unique_ptr<PJRT_DeviceDescription>> owned;  // for standalone Create
+  std::vector<std::unique_ptr<PJRT_DeviceDescription>> owned;
   std::vector<PJRT_DeviceDescription*> descriptions;
 };
 
 struct PJRT_Client {
   std::string platform_name = "metal";
   std::string platform_version = "mccl-jax 0.0.1 (PJRT 0.55)";
-  int process_index = 0;                  // this host's rank (node_id)
-  int num_processes = 1;                   // cluster size (num_nodes)
+  int process_index = 0;
+  int num_processes = 1;
   std::vector<std::unique_ptr<PJRT_Device>> owned_devices;
-  std::vector<PJRT_Device*> devices;              // all ranks' devices (the global mesh)
-  std::vector<PJRT_Device*> addressable_devices;  // just this host's
+  std::vector<PJRT_Device*> devices;
+  std::vector<PJRT_Device*> addressable_devices;
   std::vector<std::unique_ptr<PJRT_Memory>> owned_memories;
-  std::vector<PJRT_Memory*> memories;             // this host's (addressable) memories
+  std::vector<PJRT_Memory*> memories;
   std::unique_ptr<PJRT_TopologyDescription> topology;
 #ifdef MCCL_JAX_WITH_JAM
-  std::unique_ptr<mccl_collective::Comm> comm;    // mccl communicator (null when num_processes == 1)
+  std::unique_ptr<mccl_collective::Comm> comm;
 #endif
 };
 
-// Async completion future; synchronous ops hand back an already-ready event.
 struct PJRT_Event {
   std::mutex mu;
   std::condition_variable cv;
   bool ready = false;
-  PJRT_Error* error = nullptr;  // owned; nullptr == success; valid once ready
+  PJRT_Error* error = nullptr;
   std::vector<std::pair<PJRT_Event_OnReadyCallback, void*>> on_ready;
 };
 
 struct PJRT_ExecuteContext {};
 
-// Device array backed by a shared-storage MTLBuffer (UMA). External refs defer the free past Delete.
 struct PJRT_Buffer {
   PJRT_Client* client = nullptr;
   PJRT_Device* device = nullptr;
@@ -98,22 +92,21 @@ struct PJRT_Buffer {
   PJRT_Buffer_Type type = PJRT_Buffer_Type_INVALID;
   std::vector<int64_t> dims;
   size_t nbytes = 0;
-  void* data = nullptr;    // MTLBuffer contents (host-addressable UMA)
-  void* handle = nullptr;  // opaque id<MTLBuffer>
+  void* data = nullptr;
+  void* handle = nullptr;
   int external_refs = 0;
   bool delete_requested = false;
   bool deleted = false;
 };
 
 #ifdef MCCL_JAX_WITH_JAM
-// PJRT_Executable is the introspection view; PJRT_LoadedExecutable is the runnable handle.
-// Both share the CompiledProgram.
+
 struct PJRT_Executable {
   std::shared_ptr<mccl_jax::jam::CompiledProgram> program;
   std::string name = "jam.main";
   std::vector<PJRT_Buffer_Type> out_types;
-  std::vector<int64_t> out_dims_flat;     // all outputs' dims concatenated
-  std::vector<size_t> out_dim_sizes;      // rank per output
+  std::vector<int64_t> out_dims_flat;
+  std::vector<size_t> out_dim_sizes;
   std::vector<std::string> out_mem_kinds;
   std::vector<const char*> out_mem_kind_ptrs;
   std::vector<size_t> out_mem_kind_sizes;
@@ -133,8 +126,6 @@ PJRT_Error* MakeUnimplemented(const char* name) {
                         std::string(name) + " is not implemented in mccl-jax yet"};
 }
 
-// Build the client for one host of a `num_nodes`-host cluster (one Metal device per host;
-// device k belongs to rank k, only this host's is addressable).
 PJRT_Client* CreateClient(int num_nodes, int node_id) {
   auto client = std::make_unique<PJRT_Client>();
   client->process_index = node_id;
@@ -164,7 +155,7 @@ PJRT_Client* CreateClient(int num_nodes, int node_id) {
     dev->memories = {mps.get(), cpu.get()};
     dev->default_memory = mps.get();
     if (dev->addressable) {
-      client->memories = {mps.get(), cpu.get()};  // addressable memories = this host's
+      client->memories = {mps.get(), cpu.get()};
       client->addressable_devices.push_back(dev);
     }
     client->owned_memories.push_back(std::move(mps));
@@ -191,7 +182,6 @@ void ReleaseStorage(PJRT_Buffer* b) {
   }
 }
 
-// ---- errors ----
 void ErrorDestroy(PJRT_Error_Destroy_Args* a) { delete a->error; }
 void ErrorMessage(PJRT_Error_Message_Args* a) {
   a->message = a->error->message.c_str();
@@ -202,7 +192,6 @@ PJRT_Error* ErrorGetCode(PJRT_Error_GetCode_Args* a) {
   return nullptr;
 }
 
-// ---- events ----  (returned PJRT_Error*s are independent copies the caller frees)
 PJRT_Event* MakeReadyEvent(PJRT_Error* error = nullptr) {
   auto* e = new PJRT_Event();
   e->ready = true;
@@ -240,7 +229,6 @@ PJRT_Error* EventOnReady(PJRT_Event_OnReady_Args* a) {
   return nullptr;
 }
 
-// ---- plugin ----
 PJRT_Error* PluginInitialize(PJRT_Plugin_Initialize_Args*) { return nullptr; }
 PJRT_Error* PluginAttributes(PJRT_Plugin_Attributes_Args* a) {
   a->attributes = nullptr;
@@ -248,9 +236,8 @@ PJRT_Error* PluginAttributes(PJRT_Plugin_Attributes_Args* a) {
   return nullptr;
 }
 
-// ---- client ----
 PJRT_Error* ClientCreate(PJRT_Client_Create_Args* a) {
-  // node_id / num_nodes come from create_options (jax.distributed.initialize); absent => single host.
+
   int node_id = 0, num_nodes = 1;
   for (size_t i = 0; i < a->num_options; ++i) {
     const PJRT_NamedValue& nv = a->create_options[i];
@@ -264,7 +251,7 @@ PJRT_Error* ClientCreate(PJRT_Client_Create_Args* a) {
   if (node_id < 0 || node_id >= num_nodes) node_id = 0;
   PJRT_Client* client = CreateClient(num_nodes, node_id);
 #ifdef MCCL_JAX_WITH_JAM
-  // Multi-host: do the mccl rendezvous now (blocks until all ranks; reads MCCL_BOOTSTRAP_IP/PORT).
+
   if (num_nodes > 1) {
     std::string err;
     client->comm = mccl_collective::Comm::Create(num_nodes, node_id, &err);
@@ -330,7 +317,6 @@ PJRT_Error* ClientTopologyDescription(PJRT_Client_TopologyDescription_Args* a) {
   return nullptr;
 }
 
-// ---- device ----
 PJRT_Error* DeviceGetDescription(PJRT_Device_GetDescription_Args* a) {
   a->device_description = &a->device->description;
   return nullptr;
@@ -353,7 +339,7 @@ PJRT_Error* DeviceDefaultMemory(PJRT_Device_DefaultMemory_Args* a) {
   return nullptr;
 }
 PJRT_Error* DeviceMemoryStats(PJRT_Device_MemoryStats_Args* a) {
-  // We don't track allocator stats; report 0 in-use and leave the rest unset.
+
   a->bytes_in_use = 0;
   a->peak_bytes_in_use_is_set = false;
   a->num_allocs_is_set = false;
@@ -368,7 +354,6 @@ PJRT_Error* DeviceMemoryStats(PJRT_Device_MemoryStats_Args* a) {
   return nullptr;
 }
 
-// ---- device description ----
 PJRT_Error* DescId(PJRT_DeviceDescription_Id_Args* a) {
   a->id = a->device_description->id;
   return nullptr;
@@ -398,7 +383,6 @@ PJRT_Error* DescToString(PJRT_DeviceDescription_ToString_Args* a) {
   return nullptr;
 }
 
-// ---- memory spaces ----
 PJRT_Error* MemoryId(PJRT_Memory_Id_Args* a) { a->id = a->memory->id; return nullptr; }
 PJRT_Error* MemoryKind(PJRT_Memory_Kind_Args* a) {
   a->kind = a->memory->kind.c_str();
@@ -422,7 +406,6 @@ PJRT_Error* MemoryAddressableByDevices(PJRT_Memory_AddressableByDevices_Args* a)
   return nullptr;
 }
 
-// ---- topology ----
 PJRT_Error* TopologyCreate(PJRT_TopologyDescription_Create_Args* a) {
   auto* t = new PJRT_TopologyDescription();
   auto d = std::make_unique<PJRT_DeviceDescription>();
@@ -458,7 +441,6 @@ PJRT_Error* TopologyAttributes(PJRT_TopologyDescription_Attributes_Args* a) {
   return nullptr;
 }
 
-// ---- execute context ----
 PJRT_Error* ExecuteContextCreate(PJRT_ExecuteContext_Create_Args* a) {
   a->context = new PJRT_ExecuteContext();
   return nullptr;
@@ -468,7 +450,6 @@ PJRT_Error* ExecuteContextDestroy(PJRT_ExecuteContext_Destroy_Args* a) {
   return nullptr;
 }
 
-// ---- buffers (Metal unified memory; see src/execution) ----
 size_t ByteWidth(PJRT_Buffer_Type t) {
   switch (t) {
     case PJRT_Buffer_Type_PRED:
@@ -521,7 +502,6 @@ PJRT_Error* ClientBufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Args* a)
     return new PJRT_Error{PJRT_Error_Code_RESOURCE_EXHAUSTED, "BufferFromHostBuffer: Metal allocation failed"};
   if (nbytes != 0) std::memcpy(alloc.data, a->data, nbytes);
 
-  // JAX may target a memory space (device null) or a device (memory null).
   PJRT_Device* device = a->device;
   PJRT_Memory* memory = a->memory;
   if (device == nullptr && memory != nullptr && !memory->devices.empty()) device = memory->devices.front();
@@ -542,7 +522,7 @@ PJRT_Error* ClientBufferFromHostBuffer(PJRT_Client_BufferFromHostBuffer_Args* a)
 }
 
 PJRT_Error* BufferToHostBuffer(PJRT_Buffer_ToHostBuffer_Args* a) {
-  if (a->dst == nullptr) {  // size query
+  if (a->dst == nullptr) {
     a->dst_size = a->src->nbytes;
     a->event = MakeReadyEvent();
     return nullptr;
@@ -580,7 +560,7 @@ PJRT_Error* BufferDestroy(PJRT_Buffer_Destroy_Args* a) {
 PJRT_Error* BufferDelete(PJRT_Buffer_Delete_Args* a) {
   a->buffer->deleted = true;
   if (a->buffer->external_refs == 0) ReleaseStorage(a->buffer);
-  else a->buffer->delete_requested = true;  // keep alive for the external holder (mccl)
+  else a->buffer->delete_requested = true;
   return nullptr;
 }
 PJRT_Error* BufferIsDeleted(PJRT_Buffer_IsDeleted_Args* a) {
@@ -627,11 +607,11 @@ PJRT_Error* BufferReadyEvent(PJRT_Buffer_ReadyEvent_Args* a) {
   return nullptr;
 }
 PJRT_Error* BufferUnsafePointer(PJRT_Buffer_UnsafePointer_Args* a) {
-  a->buffer_pointer = reinterpret_cast<uintptr_t>(a->buffer->data);  // UMA host pointer
+  a->buffer_pointer = reinterpret_cast<uintptr_t>(a->buffer->data);
   return nullptr;
 }
 PJRT_Error* BufferOpaqueDeviceMemoryDataPointer(PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* a) {
-  a->device_memory_ptr = a->buffer->data;  // mccl zero-copy seam
+  a->device_memory_ptr = a->buffer->data;
   return nullptr;
 }
 PJRT_Error* BufferIncreaseExternalReferenceCount(PJRT_Buffer_IncreaseExternalReferenceCount_Args* a) {
@@ -645,7 +625,7 @@ PJRT_Error* BufferDecreaseExternalReferenceCount(PJRT_Buffer_DecreaseExternalRef
 }
 
 #ifdef MCCL_JAX_WITH_JAM
-// ---- compile + execute (jam) ------------------------------------------------
+
 PJRT_Buffer_Type JamPjrtType(mccl_jax::jam::DType d) {
   using DT = mccl_jax::jam::DType;
   switch (d) {
@@ -656,23 +636,22 @@ PJRT_Buffer_Type JamPjrtType(mccl_jax::jam::DType d) {
     case DT::kU16:  return PJRT_Buffer_Type_U16;
     case DT::kF16:  return PJRT_Buffer_Type_F16;
     case DT::kBF16: return PJRT_Buffer_Type_BF16;
-    case DT::kI32:  case DT::kI64: return PJRT_Buffer_Type_S32;  // i64 narrowed on device
+    case DT::kI32:  case DT::kI64: return PJRT_Buffer_Type_S32;
     case DT::kU32:  case DT::kU64: return PJRT_Buffer_Type_U32;
-    default:        return PJRT_Buffer_Type_F32;  // f32 / f64
+    default:        return PJRT_Buffer_Type_F32;
   }
 }
 
-// jam DType / ReduceKind -> mccl collective vocabulary (for all_reduce).
 mccl_collective::DType ToMcclDType(mccl_jax::jam::DType d) {
   using DT = mccl_jax::jam::DType;
   switch (d) {
     case DT::kI8:   return mccl_collective::DType::kInt8;
     case DT::kU8:   return mccl_collective::DType::kUint8;
-    case DT::kI32:  case DT::kI64: return mccl_collective::DType::kInt32;   // i64 narrowed on device
+    case DT::kI32:  case DT::kI64: return mccl_collective::DType::kInt32;
     case DT::kU32:  case DT::kU64: return mccl_collective::DType::kUint32;
     case DT::kF16:  return mccl_collective::DType::kFloat16;
     case DT::kBF16: return mccl_collective::DType::kBfloat16;
-    default:        return mccl_collective::DType::kFloat32;  // f32 / f64 (f64 narrowed)
+    default:        return mccl_collective::DType::kFloat32;
   }
 }
 mccl_collective::ReduceOp ToMcclReduce(mccl_jax::jam::ReduceKind r) {
@@ -701,7 +680,7 @@ void CacheExecutableOutputs(PJRT_Executable* e) {
 
 PJRT_Error* ClientCompile(PJRT_Client_Compile_Args* a) {
   const PJRT_Program* p = a->program;
-  // Optional: dump the StableHLO artifact the plugin actually receives (post SPMD partitioning).
+
   if (const char* dump = std::getenv("JAM_DUMP_ARTIFACT")) {
     if (FILE* f = std::fopen(dump, "wb")) { std::fwrite(p->code, 1, p->code_size, f); std::fclose(f); }
   }
@@ -711,8 +690,7 @@ PJRT_Error* ClientCompile(PJRT_Client_Compile_Args* a) {
   auto le = std::make_unique<PJRT_LoadedExecutable>();
   le->client = a->client;
   le->program = std::shared_ptr<mccl_jax::jam::CompiledProgram>(std::move(r.program));
-  // Executable runs on this host's addressable device(s) only; in a multi-host SPMD run each
-  // process executes its own shard (the cross-host reduction is done by mccl in the collective).
+
   le->devices = a->client->addressable_devices;
   a->executable = le.release();
   return nullptr;
@@ -772,12 +750,10 @@ PJRT_Error* LoadedAddressableDevices(PJRT_LoadedExecutable_AddressableDevices_Ar
   return nullptr;
 }
 
-// Run the program once per device; outputs written to output_lists[device][out] as fresh buffers.
 PJRT_Error* LoadedExecute(PJRT_LoadedExecutable_Execute_Args* a) {
   PJRT_LoadedExecutable* le = a->executable;
   if (!le->program) return new PJRT_Error{PJRT_Error_Code_INVALID_ARGUMENT, "Execute: deleted executable"};
 
-  // Route collective steps to mccl over the client's comm. Single-host (no comm) => identity.
   mccl_collective::Comm* comm = le->client ? le->client->comm.get() : nullptr;
   mccl_jax::jam::CollectiveFn collective =
       [comm](mccl_jax::jam::CollectiveOp op, mccl_jax::jam::ReduceKind r,
@@ -786,7 +762,7 @@ PJRT_Error* LoadedExecute(PJRT_LoadedExecutable_Execute_Args* a) {
              const std::vector<std::pair<int, int>>& pairs) -> std::string {
     using CO = mccl_jax::jam::CollectiveOp;
     mccl_collective::DType mdt = ToMcclDType(dt);
-    if (comm == nullptr) {  // 1 rank: every collective is identity (copy for shape-changing ops)
+    if (comm == nullptr) {
       if (send != recv && recv_count != 0)
         std::memcpy(recv, send, recv_count * mccl_collective::DTypeSize(mdt));
       return "";
@@ -796,24 +772,24 @@ PJRT_Error* LoadedExecute(PJRT_LoadedExecutable_Execute_Args* a) {
     switch (op) {
       case CO::kAllReduce:
         s = mccl_collective::AllReduce(*comm, send, recv, send_count, mdt, mop); break;
-      case CO::kAllGather:  // send_count = this rank's contribution; recv = send_count * n_ranks
+      case CO::kAllGather:
         s = mccl_collective::AllGather(*comm, send, recv, send_count, mdt); break;
-      case CO::kReduceScatter:  // recv_count = this rank's slice; send = recv_count * n_ranks
+      case CO::kReduceScatter:
         s = mccl_collective::ReduceScatter(*comm, send, recv, recv_count, mdt, mop); break;
       case CO::kBroadcast:
         s = mccl_collective::Broadcast(*comm, send, recv, send_count, mdt, root); break;
-      case CO::kAllToAll: {  // mccl wants the per-peer count, jam carries the total
+      case CO::kAllToAll: {
         int n = comm->n_ranks();
         s = mccl_collective::AllToAll(*comm, send, recv, n > 0 ? send_count / n : send_count, mdt);
         break;
       }
-      case CO::kCollectivePermute: {  // resolve this rank's target/source from the routing table
+      case CO::kCollectivePermute: {
         int me = comm->rank(), target = -1, source = -1;
         for (const auto& p : pairs) {
           if (p.first == me) target = p.second;
           if (p.second == me) source = p.first;
         }
-        if (source < 0 && recv_count != 0)  // unsent ranks read zeros
+        if (source < 0 && recv_count != 0)
           std::memset(recv, 0, recv_count * mccl_collective::DTypeSize(mdt));
         if (target < 0 && source < 0) { s = mccl_collective::Status::Ok(); break; }
         s = mccl_collective::Permute(*comm, send, recv, send_count, mdt, target, source);
@@ -851,11 +827,8 @@ PJRT_Error* LoadedExecute(PJRT_LoadedExecutable_Execute_Args* a) {
   }
   return nullptr;
 }
-#endif  // MCCL_JAX_WITH_JAM
+#endif
 
-// ---- not-yet-implemented surface --------------------------------------------
-// Every PJRT_Api entry point not implemented above; to graduate one, write+bind a handler and
-// delete it here. Without jam the compile/execute surface is stubbed too (loader-only plugin).
 #ifdef MCCL_JAX_WITH_JAM
 #define MCCL_JAX_UNIMPLEMENTED(X)                                               \
   X(Executable_SizeOfGeneratedCodeInBytes) X(Executable_GetCostAnalysis)       \
@@ -899,7 +872,7 @@ PJRT_Error* LoadedExecute(PJRT_LoadedExecutable_Execute_Args* a) {
 MCCL_JAX_UNIMPLEMENTED(MCCL_JAX_DEFINE_STUB)
 #undef MCCL_JAX_DEFINE_STUB
 
-}  // namespace
+}
 
 extern "C" const PJRT_Api* GetPjrtApi() {
   static PJRT_Api api = [] {

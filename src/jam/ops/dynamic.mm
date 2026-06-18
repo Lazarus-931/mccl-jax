@@ -1,5 +1,3 @@
-// ops/dynamic.mm — dynamic-shape family; handlers use the static result shape, dynamic shapes fail.
-
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #include <cstdint>
@@ -22,13 +20,11 @@ bool HasStaticResult(mlir::Operation* op) {
   return rt && rt.hasStaticShape();
 }
 
-// dynamic_reshape(operand, shape) → static reshape to the result shape.
 void DynamicReshape(Lowering& L, mlir::Operation* op) {
   if (!HasStaticResult(op)) { L.fail("jam: dynamic_reshape with dynamic result shape unsupported"); return; }
   Set(L, op, Reshaped(L, A(L, op), OutShape(op)));
 }
 
-// dynamic_broadcast_in_dim(operand, output_dimensions) → static broadcast_in_dim.
 void DynamicBroadcastInDim(Lowering& L, mlir::Operation* op) {
   if (!HasStaticResult(op)) { L.fail("jam: dynamic_broadcast_in_dim with dynamic result unsupported"); return; }
   auto b = mlir::cast<mlir::stablehlo::DynamicBroadcastInDimOp>(op);
@@ -41,7 +37,6 @@ void DynamicBroadcastInDim(Lowering& L, mlir::Operation* op) {
   Set(L, op, Broadcasted(L, r, outShape));
 }
 
-// dynamic_iota(shape) → static iota along the iota dimension.
 void DynamicIota(Lowering& L, mlir::Operation* op) {
   if (!HasStaticResult(op)) { L.fail("jam: dynamic_iota with dynamic result unsupported"); return; }
   auto io = mlir::cast<mlir::stablehlo::DynamicIotaOp>(op);
@@ -51,7 +46,6 @@ void DynamicIota(Lowering& L, mlir::Operation* op) {
   Set(L, op, Casted(L, ramp, Lowering::MpsDType(rt.getElementType())));
 }
 
-// Read a 1-D integer constant operand into a vector. Returns false if not a constant.
 bool ConstIntVec(mlir::Value v, std::vector<int64_t>* out) {
   auto cst = mlir::dyn_cast_or_null<mlir::stablehlo::ConstantOp>(v.getDefiningOp());
   if (!cst) return false;
@@ -61,7 +55,6 @@ bool ConstIntVec(mlir::Value v, std::vector<int64_t>* out) {
   return true;
 }
 
-// real_dynamic_slice: lower to a static slice when start/limit/stride are constants.
 void RealDynamicSlice(Lowering& L, mlir::Operation* op) {
   std::vector<int64_t> start, limit, stride;
   if (!ConstIntVec(op->getOperand(1), &start) || !ConstIntVec(op->getOperand(2), &limit) ||
@@ -73,7 +66,6 @@ void RealDynamicSlice(Lowering& L, mlir::Operation* op) {
                              strides:IntArray(stride) name:nil]);
 }
 
-// dynamic_pad: lower to a static constant pad when low/high (>=0) and interior (==0) are constants.
 void DynamicPad(Lowering& L, mlir::Operation* op) {
   std::vector<int64_t> low, high, interior;
   if (!ConstIntVec(op->getOperand(2), &low) || !ConstIntVec(op->getOperand(3), &high) ||
@@ -84,7 +76,7 @@ void DynamicPad(Lowering& L, mlir::Operation* op) {
   for (int64_t v : interior) if (v != 0) { L.fail("jam: dynamic_pad interior padding unsupported"); return; }
   for (int64_t v : low) if (v < 0) { L.fail("jam: dynamic_pad negative padding unsupported"); return; }
   for (int64_t v : high) if (v < 0) { L.fail("jam: dynamic_pad negative padding unsupported"); return; }
-  // pad value (operand 1): use 0.0 unless it's a constant.
+
   double fill = 0.0;
   std::vector<int64_t> fillVec;
   if (auto cst = mlir::dyn_cast_or_null<mlir::stablehlo::ConstantOp>(op->getOperand(1).getDefiningOp())) {
@@ -98,7 +90,6 @@ void DynamicPad(Lowering& L, mlir::Operation* op) {
                  constantValue:fill name:nil]);
 }
 
-// get_dimension_size(operand) → scalar i32 = static size of dimension `dimension`.
 void GetDimensionSize(Lowering& L, mlir::Operation* op) {
   auto g = mlir::cast<mlir::stablehlo::GetDimensionSizeOp>(op);
   auto inTy = mlir::cast<mlir::RankedTensorType>(op->getOperand(0).getType());
@@ -111,12 +102,11 @@ void GetDimensionSize(Lowering& L, mlir::Operation* op) {
                                       shape:@[ @1 ] dataType:MPSDataTypeInt32]);
 }
 
-// set_dimension_size: no-op on the data; forward the operand.
 void SetDimensionSize(Lowering& L, mlir::Operation* op) {
   Set(L, op, A(L, op));
 }
 
-}  // namespace
+}
 
 void RegisterDynamic() {
   RegisterOp("stablehlo.dynamic_reshape", DynamicReshape);
@@ -126,7 +116,7 @@ void RegisterDynamic() {
   RegisterOp("stablehlo.dynamic_pad", DynamicPad);
   RegisterOp("stablehlo.get_dimension_size", GetDimensionSize);
   RegisterOp("stablehlo.set_dimension_size", SetDimensionSize);
-  // dynamic_slice/gather/conv: handled elsewhere once canonicalize-dynamism folds them.
+
 }
 
-}  // namespace mccl_jax::jam
+}

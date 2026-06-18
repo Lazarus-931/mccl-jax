@@ -5,10 +5,10 @@
 namespace mccl_jax::metal {
 namespace {
 id<MTLDevice> DefaultDevice() {
-  static id<MTLDevice> device = MTLCreateSystemDefaultDevice();  // process-lifetime
+  static id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   return device;
 }
-}  // namespace
+}
 
 Allocation Allocate(size_t nbytes) {
   if (nbytes == 0) return {};
@@ -18,14 +18,14 @@ Allocation Allocate(size_t nbytes) {
   if (buffer == nil) return {};
   Allocation a;
   a.data = [buffer contents];
-  a.handle = (__bridge_retained void*)buffer;  // keep alive until Release()
+  a.handle = (__bridge_retained void*)buffer;
   return a;
 }
 
 void Release(void* handle) {
   if (handle == nullptr) return;
-  id<MTLBuffer> buffer = (__bridge_transfer id<MTLBuffer>)handle;  // ARC releases
+  id<MTLBuffer> buffer = (__bridge_transfer id<MTLBuffer>)handle;
   (void)buffer;
 }
 
-}  // namespace mccl_jax::metal
+}

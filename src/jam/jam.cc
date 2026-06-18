@@ -23,4 +23,4 @@ CompileResult Compile(const char* stablehlo_bytecode, std::size_t size, int num_
   return result;
 }
 
-}  // namespace mccl_jax::jam
+}

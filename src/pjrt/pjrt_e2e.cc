@@ -1,7 +1,3 @@
-// pjrt_e2e — end-to-end harness driving the plugin through the PJRT C API (Create/Compile/Execute).
-//   pjrt_e2e <artifact.mlirbc> <out_dir> [ <in.bin> <typecode> <shape> ]...
-// typecode in {f32,f16,i32,i8,u8,i16,u16,u32,pred}; shape like "2x3" ("" for scalar).
-
 #include "src/pjrt/api/pjrt_c_api.h"
 
 #include <cstdint>
@@ -59,7 +55,7 @@ int Fail(PJRT_Error* err, const char* what) {
   return 3;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
   if (argc < 3 || (argc - 3) % 3 != 0) {
@@ -86,7 +82,6 @@ int main(int argc, char** argv) {
   if (da.num_addressable_devices == 0) { fprintf(stderr, "pjrt_e2e: no devices\n"); return 3; }
   PJRT_Device* device = da.addressable_devices[0];
 
-  // ---- inputs: host arrays -> device buffers ----
   int n_in = (argc - 3) / 3;
   std::vector<std::string> in_bytes(n_in);
   std::vector<std::vector<int64_t>> in_dims(n_in);
@@ -116,7 +111,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- compile (jam) ----
   PJRT_Program prog;
   std::memset(&prog, 0, sizeof(prog));
   prog.struct_size = sizeof(prog);
@@ -134,7 +128,6 @@ int main(int argc, char** argv) {
   if (PJRT_Error* e = g_api->PJRT_Client_Compile(&ca)) return Fail(e, "Client_Compile");
   PJRT_LoadedExecutable* loaded = ca.executable;
 
-  // num outputs (via the introspection view)
   PJRT_LoadedExecutable_GetExecutable_Args ge;
   std::memset(&ge, 0, sizeof(ge));
   ge.struct_size = sizeof(ge);
@@ -147,7 +140,6 @@ int main(int argc, char** argv) {
   if (PJRT_Error* e = g_api->PJRT_Executable_NumOutputs(&no)) return Fail(e, "NumOutputs");
   int n_out = (int)no.num_outputs;
 
-  // ---- execute ----
   std::vector<PJRT_Buffer*> out_bufs(n_out, nullptr);
   PJRT_Buffer* const* arg_row = in_bufs.data();
   PJRT_Buffer** out_row = out_bufs.data();
@@ -168,7 +160,6 @@ int main(int argc, char** argv) {
   ex.execute_device = device;
   if (PJRT_Error* e = g_api->PJRT_LoadedExecutable_Execute(&ex)) return Fail(e, "Execute");
 
-  // ---- outputs: device -> host -> file ----
   for (int i = 0; i < n_out; ++i) {
     PJRT_Buffer_ToHostBuffer_Args th;
     std::memset(&th, 0, sizeof(th));
